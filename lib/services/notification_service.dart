@@ -65,6 +65,7 @@ class NotificationService {
     required Map<String, Subject> subjects,
     required StudyPreferences prefs,
     required String Function(String en, String si) t,
+    List<DailyTask> daily = const [],
   }) async {
     if (!_ready) return;
     try {
@@ -87,6 +88,18 @@ class NotificationService {
             '${task.title} · ${task.durationMinutes} min',
             at,
           );
+        }
+      }
+
+      // Daily to-dos with a due time: remind at the due time, next 7 days.
+      var did = 3000;
+      for (var d = 0; d < 7 && did < 3060; d++) {
+        final day = dateOnly(now).add(Duration(days: d));
+        for (final x in daily) {
+          final due = x.dueOn(day);
+          if (!x.remind || due == null || !x.occursOn(day) || x.doneOn(day) || due.isBefore(now)) continue;
+          await _schedule(did++, t('✅ Task due: ${x.title}', '✅ කාර්යය: ${x.title}'),
+              x.note.isEmpty ? t('Tap to open your daily tasks', 'ඔබේ දෛනික කාර්යයන් බලන්න') : x.note, due);
         }
       }
 

@@ -4,6 +4,7 @@ import 'package:provider/provider.dart';
 import '../state/app_state.dart';
 import '../theme/app_theme.dart';
 import '../widgets/ui.dart';
+import 'forgot_password_screen.dart';
 import 'splash_screen.dart';
 
 class AuthScreen extends StatefulWidget {
@@ -18,6 +19,9 @@ class _AuthScreenState extends State<AuthScreen> {
   bool _busy = false;
   bool _showPass = false;
   String? _error;
+  String? _success;
+  int? _question;
+  final _answer = TextEditingController();
   final _name = TextEditingController();
   final _email = TextEditingController();
   final _pass = TextEditingController();
@@ -27,6 +31,7 @@ class _AuthScreenState extends State<AuthScreen> {
     _name.dispose();
     _email.dispose();
     _pass.dispose();
+    _answer.dispose();
     super.dispose();
   }
 
@@ -37,7 +42,16 @@ class _AuthScreenState extends State<AuthScreen> {
         'exists' => app.t('This email is already registered. Sign in instead.', 'මෙම ඊමේල් දැනටමත් ලියාපදිංචියි. පිවිසෙන්න.'),
         'empty' => app.t('Please fill in all fields.', 'සියලු ක්ෂේත්‍ර පුරවන්න.'),
         'notfound' => app.t('No account found. Create one below.', 'ගිණුමක් හමු නොවීය. අලුතින් සාදන්න.'),
-        'wrong' => app.t('Incorrect password.', 'මුරපදය වැරදියි.'),
+        'wrong' => app.t('Incorrect password. Forgot it? Tap "Forgot password?" below.',
+            'මුරපදය වැරදියි. අමතකද? පහත "මුරපදය අමතකද?" ඔබන්න.'),
+        'question' => app.t('Please choose a security question.', 'ආරක්ෂක ප්‍රශ්නයක් තෝරන්න.'),
+        'credentials' => app.t('Email or password is incorrect.', 'ඊමේල් හෝ මුරපදය වැරදියි.'),
+        'network' => app.t('No internet connection. Connect and try again.', 'අන්තර්ජාල සම්බන්ධතාවයක් නැත. නැවත උත්සාහ කරන්න.'),
+        'toomany' => app.t('Too many attempts. Please wait a few minutes.', 'උත්සාහයන් වැඩියි. මිනිත්තු කිහිපයක් රැඳී සිටින්න.'),
+        'disabled' => app.t('This account has been disabled.', 'මෙම ගිණුම අක්‍රිය කර ඇත.'),
+        'notenabled' => app.t('Email sign-in is not enabled in Firebase yet (see FIREBASE_SETUP.md).',
+            'Firebase හි ඊමේල් පිවිසුම තවම සක්‍රිය කර නැත.'),
+        'answer' => app.t('Please answer your security question.', 'ඔබේ ආරක්ෂක ප්‍රශ්නයට පිළිතුරු දෙන්න.'),
         _ => app.t('Something went wrong.', 'දෝෂයක් සිදුවිය.'),
       };
 
@@ -46,14 +60,53 @@ class _AuthScreenState extends State<AuthScreen> {
     setState(() {
       _busy = true;
       _error = null;
+      _success = null;
     });
-    final err = _register
-        ? await app.register(_name.text, _email.text, _pass.text)
-        : await app.signIn(_email.text, _pass.text);
+    if (_register) {
+      final err = await app.register(_name.text, _email.text, _pass.text, questionId: _question, answer: _answer.text);
+      if (!mounted) return;
+      setState(() {
+        _busy = false;
+        if (err != null) {
+          _error = _message(app, err);
+          return;
+        }
+        // Registered: switch to Sign in with the email filled in.
+        _register = false;
+        _email.text = _email.text.trim().toLowerCase();
+        _pass.clear();
+        _name.clear();
+        _answer.clear();
+        _question = null;
+        _showPass = false;
+        _success = app.t('Account created! Sign in with your email and password.',
+            'ගිණුම සාදන ලදී! ඔබේ ඊමේල් සහ මුරපදයෙන් පිවිසෙන්න.');
+      });
+      return;
+    }
+    final err = await app.signIn(_email.text, _pass.text);
     if (!mounted) return;
     setState(() {
       _busy = false;
       _error = err == null ? null : _message(app, err);
+    });
+  }
+
+  Future<void> _forgot() async {
+    final app = context.read<AppState>();
+    final email = await Navigator.push<String>(
+      context,
+      MaterialPageRoute(builder: (_) => ForgotPasswordScreen(initialEmail: _email.text.trim())),
+    );
+    if (email == null || !mounted) return;
+    setState(() {
+      _email.text = email;
+      _pass.clear();
+      _error = null;
+      _success = app.cloudEnabled
+          ? app.t('Reset link sent to $email. Set a new password from the email, then sign in here.',
+              '$email වෙත සබැඳියක් යවන ලදී. ඊමේල් එකෙන් නව මුරපදයක් සකසා මෙහි පිවිසෙන්න.')
+          : app.t('Password reset! Sign in with your new password.', 'මුරපදය යළි සකසන ලදී! නව මුරපදයෙන් පිවිසෙන්න.');
     });
   }
 
@@ -104,6 +157,7 @@ class _AuthScreenState extends State<AuthScreen> {
                         onChanged: (v) => setState(() {
                           _register = v;
                           _error = null;
+                          _success = null;
                         }),
                       ),
                       const SizedBox(height: 20),
@@ -147,6 +201,76 @@ class _AuthScreenState extends State<AuthScreen> {
                           ),
                         ),
                       ),
+                      // Register: security question, used by "Forgot password?".
+                      AnimatedSize(
+                        duration: const Duration(milliseconds: 250),
+                        curve: Curves.easeOutCubic,
+                        // Firebase mode resets passwords by email, so no security question is needed.
+                        child: !_register || app.cloudEnabled
+                            ? const SizedBox(width: double.infinity)
+                            : Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+                                const SizedBox(height: 14),
+                                DropdownButtonFormField<int>(
+                                  value: _question,
+                                  isExpanded: true,
+                                  borderRadius: BorderRadius.circular(16),
+                                  dropdownColor: p.surface,
+                                  decoration: InputDecoration(
+                                    hintText: app.t('Security question', 'ආරක්ෂක ප්‍රශ්නය'),
+                                    prefixIcon: const Icon(Icons.shield_outlined),
+                                  ),
+                                  items: [
+                                    for (var i = 0; i < 6; i++)
+                                      DropdownMenuItem(
+                                        value: i,
+                                        child: Text(app.securityQuestion(i),
+                                            maxLines: 2, overflow: TextOverflow.ellipsis, style: ts(13.5, w: FontWeight.w600, c: p.text)),
+                                      ),
+                                  ],
+                                  onChanged: (v) => setState(() => _question = v),
+                                ),
+                                const SizedBox(height: 14),
+                                TextField(
+                                  controller: _answer,
+                                  decoration: InputDecoration(
+                                    hintText: app.t('Your answer', 'ඔබේ පිළිතුර'),
+                                    prefixIcon: const Icon(Icons.key_rounded),
+                                  ),
+                                ),
+                                const SizedBox(height: 6),
+                                Text(
+                                  app.t('Used to reset your password if you forget it.',
+                                      'මුරපදය අමතක වුවහොත් යළි සැකසීමට භාවිතා වේ.'),
+                                  style: ts(11.5, c: p.textMuted),
+                                ),
+                              ]),
+                      ),
+                      // Sign in: forgot password.
+                      if (!_register)
+                        Align(
+                          alignment: Alignment.centerRight,
+                          child: TextButton(
+                            style: TextButton.styleFrom(padding: const EdgeInsets.only(top: 8), minimumSize: Size.zero),
+                            onPressed: _busy ? null : _forgot,
+                            child: Text(app.t('Forgot password?', 'මුරපදය අමතකද?'),
+                                style: ts(13, w: FontWeight.w800, c: AppColors.primary)),
+                          ),
+                        ),
+                      if (_success != null) ...[
+                        const SizedBox(height: 14),
+                        Container(
+                          padding: const EdgeInsets.all(12),
+                          decoration: BoxDecoration(
+                            color: AppColors.green.withOpacity(0.12),
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: Row(children: [
+                            const Icon(Icons.check_circle_rounded, color: AppColors.green, size: 18),
+                            const SizedBox(width: 8),
+                            Expanded(child: Text(_success!, style: ts(12.5, w: FontWeight.w700, c: AppColors.green))),
+                          ]),
+                        ),
+                      ],
                       if (_error != null) ...[
                         const SizedBox(height: 14),
                         Container(

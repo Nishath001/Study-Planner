@@ -5,9 +5,9 @@ import 'package:provider/provider.dart';
 
 import 'screens/auth_screen.dart';
 import 'screens/onboarding_screen.dart';
-import 'screens/setup_screen.dart';
 import 'screens/shell.dart';
 import 'screens/splash_screen.dart';
+import 'services/cloud_service.dart';
 import 'services/storage_service.dart';
 import 'state/app_state.dart';
 import 'theme/app_theme.dart';
@@ -16,6 +16,7 @@ Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await initializeDateFormatting();
   await StorageService.instance.init();
+  await CloudService.instance.init(); // Firebase, if configured (FIREBASE_SETUP.md)
   final state = AppState();
   await state.boot();
   SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(
@@ -53,8 +54,6 @@ class RootGate extends StatelessWidget {
       page = const OnboardingScreen(key: ValueKey('onboarding'));
     } else if (app.user == null) {
       page = const AuthScreen(key: ValueKey('auth'));
-    } else if (!app.setupDone) {
-      page = const SetupScreen(key: ValueKey('setup'));
     } else {
       page = MainShell(key: ValueKey('shell_${app.user!.id}'));
     }

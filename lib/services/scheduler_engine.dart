@@ -35,6 +35,9 @@ class PlanResult {
   final String? advice;
   final DateTime createdAt;
 
+  /// Exam focus: the subjects the plan concentrates on (empty otherwise).
+  final Set<String> focusSubjectIds;
+
   PlanResult({
     required this.tasks,
     required this.insights,
@@ -42,6 +45,7 @@ class PlanResult {
     required this.loadFactor,
     required this.engine,
     this.advice,
+    this.focusSubjectIds = const {},
   }) : createdAt = DateTime.now();
 
   int get totalMinutes => tasks.fold(0, (a, t) => a + t.durationMinutes);
@@ -68,6 +72,32 @@ class SchedulerEngine {
   static const wStruggle = 0.15;
   static const _dayEndHour = 23;
 
+  /// Light week uses at most this share of the student's free time.
+  static const lightLoad = 0.7;
+
+  /// (urgency, difficulty, workload, struggle) weights per planning style.
+  static (double, double, double, double) weights(PlanMode mode) => switch (mode) {
+        PlanMode.examFocus => (0.65, 0.15, 0.10, 0.10),
+        _ => (wUrgency, wDifficulty, wWorkload, wStruggle),
+      };
+
+  PlanMode _mode = PlanMode.balanced;
+  Set<String> _focus = {};
+
+  /// Exam focus: sessions per week each non-focus subject still gets.
+  static const _maintenanceSessions = 2;
+
+  /// Exam focus concentrates on exams in the next 14 days. With none that
+  /// close, the 2 nearest exams; with no exam dates, the 2 top priorities.
+  static Set<String> focusSubjects(List<SubjectInsight> insights) {
+    final dated = insights.where((i) => (i.subject.daysToExam ?? -1) >= 1).toList()
+      ..sort((a, b) => a.subject.daysToExam!.compareTo(b.subject.daysToExam!));
+    final soon = dated.where((i) => i.subject.daysToExam! <= 14).map((i) => i.subject.id).toSet();
+    if (soon.isNotEmpty) return soon;
+    if (dated.isNotEmpty) return dated.take(2).map((i) => i.subject.id).toSet();
+    return insights.take(2).map((i) => i.subject.id).toSet();
+  }
+
   int _seq = 0;
   String _id() => 'ai_${DateTime.now().microsecondsSinceEpoch}_${_seq++}';
 
@@ -84,8 +114,10 @@ class SchedulerEngine {
   List<SubjectInsight> analyse(
     List<Subject> subjects,
     List<StudyTask> tasks,
-    List<StudySession> sessions,
-  ) {
+    List<StudySession> sessions, {
+    PlanMode mode = PlanMode.balanced,
+  }) {
+    final (wu, wd, ww, ws) = weights(mode);
     final active = subjects.where((s) => !s.examPassed).toList();
     if (active.isEmpty) return [];
 
@@ -119,10 +151,7 @@ class SchedulerEngine {
           : (5 - ratings.reduce((a, b) => a + b) / ratings.length) / 4;
       final struggle = (missRate + lowFocus) / 2;
 
-      final score = wUrgency * urgency +
-          wDifficulty * difficulty +
-          wWorkload * workload +
-          wStruggle * struggle;
+      final score = wu * urgency + wd * difficulty + ww * workload + ws * struggle;
 
       out.add(SubjectInsight(
         subject: s,
@@ -145,10 +174,15 @@ class SchedulerEngine {
     required StudyPreferences prefs,
     String Function(SessionType)? typeLabel,
   }) {
-    final insights = analyse(subjects, existing, sessions);
+    _mode = prefs.planMode;
+    final insights = analyse(subjects, existing, sessions, mode: _mode);
     final adh = adherence(existing);
     // Fewer completions → lighter, more achievable plan (never below 60%).
-    final loadFactor = (0.6 + 0.4 * adh).clamp(0.6, 1.0);
+    var loadFactor = (0.6 + 0.4 * adh).clamp(0.6, 1.0).toDouble();
+    if (_mode == PlanMode.light) loadFactor = min(loadFactor, lightLoad);
+    // Exam focus is a push: use more of the free time (never above 100%).
+    if (_mode == PlanMode.examFocus) loadFactor = min(1.0, loadFactor + 0.15);
+    _focus = _mode == PlanMode.examFocus ? focusSubjects(insights) : {};
 
     final tasks = <StudyTask>[];
     if (insights.isEmpty) {
@@ -182,6 +216,8 @@ class SchedulerEngine {
         final soon = _roundUp(now.add(const Duration(minutes: 15)));
         if (soon.isAfter(cursor)) cursor = soon;
       }
+      // Late at night "today" has no time left — don't spill into tomorrow.
+      if (!sameDay(cursor, day)) continue;
 
       final dayCount = <String, int>{};
       String? last;
@@ -208,8 +244,20 @@ class SchedulerEngine {
         SubjectInsight pick;
         final eve = eligible.where((i) =>
             eveOfExam.contains(i.subject.id) && (dayCount[i.subject.id] ?? 0) < 2);
+        // Exam focus: the first session every third day keeps another subject ticking over.
+        final maintenance = _mode == PlanMode.examFocus && slot == 0 && d % 3 == 1
+            ? eligible.where((i) =>
+                !_focus.contains(i.subject.id) && planned[i.subject.id]! < _maintenanceSessions).toList()
+            : <SubjectInsight>[];
         if (eve.isNotEmpty) {
           pick = eve.first;
+        } else if (maintenance.isNotEmpty) {
+          // Rotate: the subject with the fewest sessions so far, then the higher priority.
+          pick = maintenance.reduce((a, b) {
+            final pa = planned[a.subject.id]!, pb = planned[b.subject.id]!;
+            if (pa != pb) return pa < pb ? a : b;
+            return a.score >= b.score ? a : b;
+          });
         } else {
           pick = eligible.reduce((a, b) =>
               _dynamicScore(a, need, dayCount, last, slot) >=
@@ -221,7 +269,11 @@ class SchedulerEngine {
         final sid = pick.subject.id;
         final type = eveOfExam.contains(sid)
             ? SessionType.finalRevision
-            : _sessionType(planned[sid]!, pick.subject.daysToExam);
+            : _focus.contains(sid)
+                ? _examType(planned[sid]!, pick.subject.daysToExam)
+                : _mode == PlanMode.examFocus
+                    ? SessionType.review // maintenance
+                    : _sessionType(planned[sid]!, pick.subject.daysToExam);
 
         tasks.add(StudyTask(
           id: _id(),
@@ -253,6 +305,7 @@ class SchedulerEngine {
       adherence: adh,
       loadFactor: loadFactor,
       engine: 'on-device',
+      focusSubjectIds: _focus,
     );
   }
 
@@ -261,15 +314,35 @@ class SchedulerEngine {
     final id = i.subject.id;
     final needRatio = max(need[id]!, 0) / max(i.remainingMinutes, 1);
     var s = i.score * (0.25 + needRatio);
+    final days = i.subject.daysToExam;
+    if (_mode == PlanMode.examFocus) {
+      // Concentrate on the next exams in longer blocks; others get maintenance only.
+      if (_focus.contains(id)) {
+        s *= 3.0;
+        if (days != null && days <= 7) s *= 1.5;
+        s /= 1 + (dayCount[id] ?? 0) * 0.25;
+        if (last == id) s *= 0.85;
+      } else {
+        return 0; // other subjects only get the reserved maintenance sessions
+      }
+      return s;
+    }
     s /= 1 + (dayCount[id] ?? 0) * 0.7; // spread subjects across the day
     if (last == id) s *= 0.3; // interleave — avoid back-to-back repeats
     if (slot < 2) s *= 1 + 0.35 * i.difficulty; // hard subjects at peak energy
-    final days = i.subject.daysToExam;
     if (days != null && days <= 3) s *= 1.6;
     return s;
   }
 
   /// Spaced-repetition cycle: learn → practice → review, past papers near exams.
+  /// Exam focus: exam-style practice — past papers and active recall.
+  SessionType _examType(int n, int? daysToExam) {
+    if (daysToExam != null && daysToExam <= 3) {
+      return n.isEven ? SessionType.pastPaper : SessionType.review;
+    }
+    return const [SessionType.review, SessionType.pastPaper, SessionType.practice][n % 3];
+  }
+
   SessionType _sessionType(int n, int? daysToExam) {
     if (daysToExam != null && daysToExam <= 3) {
       return n.isEven ? SessionType.pastPaper : SessionType.review;
@@ -315,6 +388,7 @@ class SchedulerEngine {
           final soon = _roundUp(now.add(const Duration(minutes: 15)));
           if (soon.isAfter(cursor)) cursor = soon;
         }
+        if (!sameDay(cursor, day)) continue;
         slot = _nextFree(cursor, t.durationMinutes, dayTasks, gap: prefs.breakMinutes);
       }
       if (slot == null) {

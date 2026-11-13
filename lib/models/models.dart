@@ -10,6 +10,9 @@ enum SessionType { learn, practice, review, pastPaper, finalRevision, custom }
 /// Preferred part of the day for studying.
 enum StudyWindow { morning, afternoon, evening, night }
 
+/// How the on-device AI shapes a plan.
+enum PlanMode { balanced, examFocus, light }
+
 extension DifficultyX on Difficulty {
   int get weight => index + 1;
 }
@@ -208,6 +211,7 @@ class StudyPreferences {
   int reminderLeadMinutes;
   bool dailyDigestOn;
   int dailyDigestHour;
+  PlanMode planMode;
 
   StudyPreferences({
     List<int>? availability,
@@ -220,6 +224,7 @@ class StudyPreferences {
     this.reminderLeadMinutes = 10,
     this.dailyDigestOn = true,
     this.dailyDigestHour = 7,
+    this.planMode = PlanMode.balanced,
   }) : availability = availability ?? [180, 180, 180, 180, 150, 300, 240];
 
   int minutesFor(DateTime d) => availability[d.weekday - 1];
@@ -236,6 +241,7 @@ class StudyPreferences {
         'lead': reminderLeadMinutes,
         'digest': dailyDigestOn,
         'digestHour': dailyDigestHour,
+        'mode': planMode.name,
       };
 
   factory StudyPreferences.fromJson(Map<String, dynamic> j) => StudyPreferences(
@@ -250,6 +256,7 @@ class StudyPreferences {
         reminderLeadMinutes: j['lead'] ?? 10,
         dailyDigestOn: j['digest'] ?? true,
         dailyDigestHour: j['digestHour'] ?? 7,
+        planMode: PlanMode.values.firstWhere((m) => m.name == j['mode'], orElse: () => PlanMode.balanced),
       );
 }
 
@@ -316,3 +323,122 @@ class AppUser {
 DateTime dateOnly(DateTime d) => DateTime(d.year, d.month, d.day);
 bool sameDay(DateTime a, DateTime b) =>
     a.year == b.year && a.month == b.month && a.day == b.day;
+
+// ── Daily task management ────────────────────────────────────────────────
+
+enum TaskPriority { low, medium, high }
+
+enum TaskCategory { study, assignment, personal, health, errand, other }
+
+enum Repeat { none, daily, weekdays, weekly }
+
+String dayKey(DateTime d) =>
+    '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
+
+class SubTask {
+  String title;
+
+  /// Days on which this step was ticked off (so repeating tasks reset each day).
+  Set<String> doneDates;
+
+  SubTask(this.title, [Set<String>? doneDates]) : doneDates = doneDates ?? {};
+
+  bool doneOn(DateTime d) => doneDates.contains(dayKey(d));
+
+  Map<String, dynamic> toJson() => {'title': title, 'done': doneDates.toList()};
+  factory SubTask.fromJson(Map<String, dynamic> j) =>
+      SubTask(j['title'], (j['done'] as List? ?? []).cast<String>().toSet());
+}
+
+/// A to-do in the student's day: assignments, errands, health, personal…
+/// Separate from AI-planned study sessions ([StudyTask]).
+class DailyTask {
+  final String id;
+  String title;
+  String note;
+  DateTime date; // the day it is due (or first day, for repeating tasks)
+  int? dueMinutes; // time of day in minutes from midnight; null = any time
+  TaskPriority priority;
+  TaskCategory category;
+  String? subjectId;
+  Repeat repeat;
+  bool remind;
+  Set<String> doneDates;
+  List<SubTask> subtasks;
+  final DateTime createdAt;
+
+  DailyTask({
+    required this.id,
+    required this.title,
+    required DateTime date,
+    this.note = '',
+    this.dueMinutes,
+    this.priority = TaskPriority.medium,
+    this.category = TaskCategory.personal,
+    this.subjectId,
+    this.repeat = Repeat.none,
+    this.remind = true,
+    Set<String>? doneDates,
+    List<SubTask>? subtasks,
+    DateTime? createdAt,
+  })  : date = dateOnly(date),
+        doneDates = doneDates ?? {},
+        subtasks = subtasks ?? [],
+        createdAt = createdAt ?? DateTime.now();
+
+  bool occursOn(DateTime d) {
+    final day = dateOnly(d);
+    if (day.isBefore(date)) return false;
+    return switch (repeat) {
+      Repeat.none => day == date,
+      Repeat.daily => true,
+      Repeat.weekdays => day.weekday <= 5,
+      Repeat.weekly => day.weekday == date.weekday,
+    };
+  }
+
+  bool doneOn(DateTime d) => doneDates.contains(dayKey(d));
+
+  DateTime? dueOn(DateTime d) =>
+      dueMinutes == null ? null : dateOnly(d).add(Duration(minutes: dueMinutes!));
+
+  /// A one-off task from an earlier day that was never finished.
+  bool isOverdue(DateTime today) =>
+      repeat == Repeat.none && date.isBefore(dateOnly(today)) && !doneOn(date);
+
+  int subtasksDoneOn(DateTime d) => subtasks.where((s) => s.doneOn(d)).length;
+
+  DailyTask copy() => DailyTask.fromJson(toJson());
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'title': title,
+        'note': note,
+        'date': date.toIso8601String(),
+        'due': dueMinutes,
+        'priority': priority.name,
+        'category': category.name,
+        'subjectId': subjectId,
+        'repeat': repeat.name,
+        'remind': remind,
+        'done': doneDates.toList(),
+        'subtasks': subtasks.map((s) => s.toJson()).toList(),
+        'createdAt': createdAt.toIso8601String(),
+      };
+
+  factory DailyTask.fromJson(Map<String, dynamic> j) => DailyTask(
+        id: j['id'],
+        title: j['title'],
+        note: j['note'] ?? '',
+        date: DateTime.parse(j['date']),
+        dueMinutes: j['due'],
+        priority: TaskPriority.values.firstWhere((p) => p.name == j['priority'], orElse: () => TaskPriority.medium),
+        category: TaskCategory.values.firstWhere((c) => c.name == j['category'], orElse: () => TaskCategory.other),
+        subjectId: j['subjectId'],
+        repeat: Repeat.values.firstWhere((r) => r.name == j['repeat'], orElse: () => Repeat.none),
+        remind: j['remind'] ?? true,
+        doneDates: (j['done'] as List? ?? []).cast<String>().toSet(),
+        subtasks: (j['subtasks'] as List? ?? []).map((s) => SubTask.fromJson(Map<String, dynamic>.from(s))).toList(),
+        createdAt: j['createdAt'] != null ? DateTime.tryParse(j['createdAt']) : null,
+      );
+}

@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "81855985836",
+    "project_id": "studyapp-28624-6558e",
+    "storage_bucket": "studyapp-28624-6558e.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:81855985836:android:1158f3cd6c3d6038d68709",
+        "android_client_info": {
+          "package_name": "lk.horizoncampus.studysync"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDwFuL24Aj-ltJIHQkzZmsQXgGKR0938sM"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

@@ -5,6 +5,11 @@ plugins {
     id "dev.flutter.flutter-gradle-plugin"
 }
 
+// Firebase config from `flutterfire configure`. Without it the app runs in offline mode.
+if (file("google-services.json").exists()) {
+    apply plugin: "com.google.gms.google-services"
+}
+
 def localProperties = new Properties()
 def localPropertiesFile = rootProject.file("local.properties")
 if (localPropertiesFile.exists()) {
@@ -30,8 +35,12 @@ android {
 
     compileOptions {
         coreLibraryDesugaringEnabled true
-        sourceCompatibility = JavaVersion.VERSION_1_8
-        targetCompatibility = JavaVersion.VERSION_1_8
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+
+    kotlinOptions {
+        jvmTarget = "17"
     }
 
     defaultConfig {
@@ -39,9 +48,9 @@ android {
         applicationId = "lk.horizoncampus.studysync"
         // You can update the following values to match your application needs.
         // For more information, see: https://docs.flutter.dev/deployment/android#reviewing-the-gradle-build-configuration.
-        minSdk = 21
+        minSdk = 23 // Firebase Auth needs Android 6.0+
         multiDexEnabled true
-        targetSdk = flutter.targetSdkVersion
+        targetSdk = 34 // fixed, so newer Flutter versions build with the same compileSdk
         versionCode = flutterVersionCode.toInteger()
         versionName = flutterVersionName
     }

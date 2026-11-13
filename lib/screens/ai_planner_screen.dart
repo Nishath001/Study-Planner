@@ -9,6 +9,7 @@ import '../widgets/pref_editors.dart';
 import '../widgets/ui.dart';
 import 'shell.dart';
 import 'subjects_screen.dart';
+import 'suggestions_screen.dart';
 
 class AIPlannerScreen extends StatefulWidget {
   const AIPlannerScreen({super.key});
@@ -19,10 +20,9 @@ class AIPlannerScreen extends StatefulWidget {
 
 class _AIPlannerScreenState extends State<AIPlannerScreen> {
   PlanResult? _preview;
-  bool _useClaude = false;
 
   Future<void> _generate(AppState app) async {
-    final r = await app.buildPlan(useClaude: _useClaude);
+    final r = await app.buildPlan();
     if (!mounted) return;
     setState(() => _preview = r);
     if (app.planError != null) {
@@ -55,11 +55,7 @@ class _AIPlannerScreenState extends State<AIPlannerScreen> {
           children: [
             Row(children: [
               Expanded(child: Text(app.t('AI Planner', 'AI සැලසුම්කරු'), style: ts(26, w: FontWeight.w800, c: p.text))),
-              Pill(
-                _useClaude ? 'Claude' : app.t('On-device', 'උපාංගය තුළ'),
-                _useClaude ? AppColors.rose : AppColors.teal,
-                icon: _useClaude ? Icons.cloud_rounded : Icons.memory_rounded,
-              ),
+              Pill(app.t('On-device', 'උපාංගය තුළ'), AppColors.teal, icon: Icons.memory_rounded),
             ]),
             const SizedBox(height: 16),
             _hero(app),
@@ -81,7 +77,7 @@ class _AIPlannerScreenState extends State<AIPlannerScreen> {
             else ...[
               _inputs(app),
               const SizedBox(height: 20),
-              _engineChooser(app),
+              _styleChooser(app),
               const SizedBox(height: 20),
               GradientButton(
                 label: app.t('Generate my ${app.prefs.planHorizonDays}-day plan', 'දින ${app.prefs.planHorizonDays} සැලැස්ම සාදන්න'),
@@ -240,53 +236,119 @@ class _AIPlannerScreenState extends State<AIPlannerScreen> {
     );
   }
 
-  Widget _engineChooser(AppState app) {
+  Widget _styleChooser(AppState app) {
     final p = context.pal;
-    Widget tile(bool claude, IconData icon, String title, String sub, Color c) {
-      final sel = _useClaude == claude;
-      final enabled = !claude || app.claudeKey.isNotEmpty;
-      return Expanded(
-        child: GestureDetector(
-          onTap: enabled ? () => setState(() => _useClaude = claude) : null,
-          child: AnimatedContainer(
-            duration: const Duration(milliseconds: 200),
-            padding: const EdgeInsets.all(14),
-            decoration: BoxDecoration(
-              color: sel ? c.withOpacity(0.1) : p.surface,
-              borderRadius: BorderRadius.circular(18),
-              border: Border.all(color: sel ? c : p.border, width: sel ? 1.8 : 1),
-            ),
-            child: Opacity(
-              opacity: enabled ? 1 : 0.5,
-              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                Row(children: [
-                  Icon(icon, color: c, size: 22),
-                  const Spacer(),
-                  if (sel) Icon(Icons.check_circle_rounded, color: c, size: 18),
-                ]),
-                const SizedBox(height: 10),
-                Text(title, style: ts(13.5, w: FontWeight.w800, c: p.text)),
-                const SizedBox(height: 2),
-                Text(sub, style: ts(11.5, c: p.textMuted, h: 1.35)),
-              ]),
-            ),
-          ),
-        ),
-      );
-    }
-
+    final styles = [
+      (PlanMode.balanced, Icons.balance_rounded, AppColors.primary,
+          app.t('Weighs exams, difficulty, workload and how you\'ve been doing',
+              'විභාග, අපහසුතාව, වැඩ ප්‍රමාණය සහ ඔබේ ප්‍රගතිය සලකයි')),
+      (PlanMode.examFocus, Icons.local_fire_department_rounded, AppColors.rose,
+          app.t('Concentrates on your next exams with past papers and revision; other subjects get a short review',
+              'ඊළඟ විභාග වෙත පසුගිය ප්‍රශ්න පත්‍ර සහ පුනරීක්ෂණයෙන් අවධානය; අනෙක් විෂයයන්ට කෙටි පුනරීක්ෂණයක්')),
+      (PlanMode.light, Icons.spa_rounded, AppColors.teal,
+          app.t('Uses about ${(SchedulerEngine.lightLoad * 100).round()}% of your free time — for busy or tiring weeks',
+              'ඔබේ නිදහස් කාලයෙන් ${(SchedulerEngine.lightLoad * 100).round()}% ක් පමණ — කාර්යබහුල සති සඳහා')),
+    ];
+    final previews = app.stylePreviews;
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      Text(app.t('Planning engine', 'සැලසුම් එන්ජිම'), style: ts(15, w: FontWeight.w800, c: p.text)),
-      const SizedBox(height: 10),
       Row(children: [
-        tile(false, Icons.memory_rounded, app.t('On-device AI', 'උපාංග AI'),
-            app.t('Private · works offline', 'පෞද්ගලික · නොබැඳිව ක්‍රියා කරයි'), AppColors.teal),
-        const SizedBox(width: 10),
-        tile(true, Icons.cloud_rounded, 'Claude AI',
-            app.claudeKey.isEmpty ? app.t('Add API key in Settings', 'සැකසුම් තුළ key එක් කරන්න') : app.t('Cloud · needs internet', 'අන්තර්ජාලය අවශ්‍යයි'),
-            AppColors.rose),
+        Expanded(child: Text(app.t('Planning style', 'සැලසුම් රටාව'), style: ts(15, w: FontWeight.w800, c: p.text))),
+        Icon(Icons.lock_outline_rounded, size: 14, color: p.textMuted),
+        const SizedBox(width: 4),
+        Text(app.t('Private · works offline', 'පෞද්ගලික · නොබැඳිව'), style: ts(11.5, w: FontWeight.w600, c: p.textMuted)),
       ]),
+      const SizedBox(height: 10),
+      for (final st in styles)
+        Padding(
+          padding: const EdgeInsets.only(bottom: 8),
+          child: () {
+            final sel = app.prefs.planMode == st.$1;
+            return GestureDetector(
+              onTap: () => app.setPlanMode(st.$1),
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 200),
+                padding: const EdgeInsets.all(14),
+                decoration: BoxDecoration(
+                  color: sel ? st.$3.withOpacity(p.isDark ? 0.14 : 0.08) : p.surface,
+                  borderRadius: BorderRadius.circular(18),
+                  border: Border.all(color: sel ? st.$3 : p.border, width: sel ? 1.8 : 1),
+                ),
+                child: Row(children: [
+                  IconBadge(st.$2, st.$3, size: 40, radius: 12),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                      Text(app.planModeLabel(st.$1), style: ts(14, w: FontWeight.w800, c: p.text)),
+                      const SizedBox(height: 2),
+                      Text(st.$4, style: ts(12, c: p.textMuted, h: 1.35)),
+                      if (app.subjects.isNotEmpty) ...[
+                        const SizedBox(height: 8),
+                        Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                          Padding(
+                            padding: const EdgeInsets.only(top: 1),
+                            child: Icon(Icons.event_note_rounded, size: 14, color: st.$3),
+                          ),
+                          const SizedBox(width: 6),
+                          Expanded(
+                            child: Text(
+                              app.t('${previews[st.$1]!.tasks.length} sessions · ${fmtMinutes(previews[st.$1]!.totalMinutes)}',
+                                  'සැසි ${previews[st.$1]!.tasks.length} · ${fmtMinutes(previews[st.$1]!.totalMinutes)}'),
+                              style: ts(12.5, w: FontWeight.w800, c: st.$3, h: 1.35),
+                            ),
+                          ),
+                        ]),
+                        if (_styleEffect(app, st.$1, previews) case final effect?) ...[
+                          const SizedBox(height: 6),
+                          Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                            Padding(
+                              padding: const EdgeInsets.only(top: 1),
+                              child: Icon(Icons.insights_rounded, size: 14, color: st.$3),
+                            ),
+                            const SizedBox(width: 6),
+                            Expanded(child: Text(effect, style: ts(12, w: FontWeight.w700, c: p.textSoft, h: 1.35))),
+                          ]),
+                        ],
+                      ],
+                    ]),
+                  ),
+                  const SizedBox(width: 8),
+                  AnimatedSwitcher(
+                    duration: const Duration(milliseconds: 200),
+                    child: sel
+                        ? Icon(Icons.check_circle_rounded, key: const ValueKey('on'), color: st.$3, size: 22)
+                        : Icon(Icons.circle_outlined, key: const ValueKey('off'), color: p.border, size: 22),
+                  ),
+                ]),
+              ),
+            );
+          }(),
+        ),
     ]);
+  }
+
+  String? _styleEffect(AppState app, PlanMode m, Map<PlanMode, PlanResult> previews) {
+    final bal = previews[PlanMode.balanced]!, r = previews[m]!;
+    switch (m) {
+      case PlanMode.balanced:
+        final top = app.minutesBySubject(r);
+        if (top.isEmpty || top.first.$2 == 0) return null;
+        return app.t('Most time: ${top.first.$1.name}', 'වැඩිම කාලය: ${top.first.$1.name}');
+      case PlanMode.examFocus:
+        final focus = r.focusSubjectIds;
+        if (focus.isEmpty || bal.totalMinutes == 0 || r.totalMinutes == 0) return null;
+        int share(PlanResult x) =>
+            (x.tasks.where((t) => focus.contains(t.subjectId)).fold<int>(0, (a, t) => a + t.durationMinutes) /
+                    x.totalMinutes *
+                    100)
+                .round();
+        final names = app.subjects.where((s) => focus.contains(s.id)).map((s) => s.name).join(' & ');
+        return app.t('$names get ${share(r)}% of your time (Balanced: ${share(bal)}%)',
+            '$names ට ඔබේ කාලයෙන් ${share(r)}% (සමබර: ${share(bal)}%)');
+      case PlanMode.light:
+        final fewer = bal.tasks.length - r.tasks.length;
+        if (fewer <= 0) return null;
+        return app.t('$fewer fewer sessions than Balanced', 'Balanced ට වඩා සැසි $fewer ක් අඩුයි');
+    }
   }
 
   Widget _previewSection(AppState app, PlanResult plan) {
@@ -305,6 +367,23 @@ class _AIPlannerScreenState extends State<AIPlannerScreen> {
             Expanded(child: Text(app.t('Your plan is ready', 'ඔබේ සැලැස්ම සූදානම්'), style: ts(17, w: FontWeight.w800, c: p.text))),
           ]),
           const SizedBox(height: 12),
+          // Switch style here to see the plan change straight away.
+          Wrap(spacing: 8, runSpacing: 8, children: [
+            for (final m in PlanMode.values)
+              ChoiceChip(
+                label: Text(app.planModeLabel(m)),
+                selected: app.prefs.planMode == m,
+                showCheckmark: false,
+                selectedColor: AppColors.violet,
+                labelStyle: ts(12.5, w: FontWeight.w700, c: app.prefs.planMode == m ? Colors.white : p.textSoft),
+                onSelected: (_) async {
+                  if (app.prefs.planMode == m) return;
+                  await app.setPlanMode(m);
+                  await _generate(app);
+                },
+              ),
+          ]),
+          const SizedBox(height: 14),
           Row(children: [
             _miniStat('${plan.tasks.length}', app.t('sessions', 'සැසි')),
             _miniStat(fmtMinutes(plan.totalMinutes), app.t('study time', 'අධ්‍යයන කාලය')),
@@ -331,6 +410,10 @@ class _AIPlannerScreenState extends State<AIPlannerScreen> {
         ]),
       ),
       const SizedBox(height: 16),
+      if (plan.tasks.isNotEmpty) ...[
+        _subjectSplit(app, plan),
+        const SizedBox(height: 16),
+      ],
       if (plan.tasks.isEmpty)
         EmptyState(
           icon: Icons.event_busy_rounded,
@@ -380,6 +463,51 @@ class _AIPlannerScreenState extends State<AIPlannerScreen> {
     ]);
   }
 
+  Widget _subjectSplit(AppState app, PlanResult plan) {
+    final p = context.pal;
+    final rows = app.minutesBySubject(plan);
+    final top = rows.isEmpty ? 1 : rows.first.$2.clamp(1, 1 << 30);
+    return AppCard(
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Text(app.t('Time per subject', 'විෂය අනුව කාලය'), style: ts(15, w: FontWeight.w800, c: p.text)),
+        const SizedBox(height: 4),
+        Text(app.t('How this style shares your week', 'මෙම රටාව ඔබේ සතිය බෙදන ආකාරය'), style: ts(12, c: p.textMuted)),
+        const SizedBox(height: 12),
+        for (final (s, mins, n) in rows)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 12),
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              // Line 1: subject (full width so the name isn't cut); line 2: exam + time.
+              Row(children: [
+                Icon(s.iconData, size: 15, color: s.color),
+                const SizedBox(width: 6),
+                Flexible(child: Text(s.name, maxLines: 1, overflow: TextOverflow.ellipsis, style: ts(13, w: FontWeight.w700, c: p.text))),
+                if (plan.focusSubjectIds.contains(s.id)) ...[
+                  const SizedBox(width: 6),
+                  Pill(app.t('Focus', 'අවධානය'), AppColors.rose, icon: Icons.local_fire_department_rounded),
+                ],
+              ]),
+              const SizedBox(height: 4),
+              Row(children: [
+                if (s.daysToExam != null && s.daysToExam! >= 0)
+                  Text(app.t('Exam in ${s.daysToExam} days', 'විභාගයට දින ${s.daysToExam}'),
+                      style: ts(11.5, w: FontWeight.w700, c: s.daysToExam! <= 7 ? AppColors.rose : p.textMuted)),
+                const Spacer(),
+                Text(
+                  mins == 0
+                      ? '—'
+                      : app.t('${fmtMinutes(mins)} · $n session${n == 1 ? '' : 's'}', '${fmtMinutes(mins)} · සැසි $n'),
+                  style: ts(12, w: FontWeight.w800, c: p.textSoft),
+                ),
+              ]),
+              const SizedBox(height: 6),
+              SoftProgressBar(value: mins / top, color: s.color, height: 7),
+            ]),
+          ),
+      ]),
+    );
+  }
+
   Widget _miniStat(String v, String l) {
     final p = context.pal;
     return Expanded(
@@ -415,6 +543,15 @@ class _AIPlannerScreenState extends State<AIPlannerScreen> {
                     'ඔබේ හොඳම වේලාවන් සොයා ගැනීමට ටයිමර් සැසිවලින් පසු අවධානය ශ්‍රේණිගත කරන්න.')
                 : app.t('You focus best around ${peak.toString().padLeft(2, '0')}:00.',
                     'ඔබ හොඳින්ම අවධානය යොමු කරන්නේ ${peak.toString().padLeft(2, '0')}:00 පමණ.')),
+        const SizedBox(height: 4),
+        OutlinedButton.icon(
+          onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const SuggestionsScreen())),
+          icon: const Icon(Icons.lightbulb_outline_rounded, size: 18),
+          label: Text(app.suggestions.isEmpty
+              ? app.t('Smart suggestions', 'බුද්ධිමත් යෝජනා')
+              : app.t('${app.suggestions.length} smart suggestions', 'බුද්ධිමත් යෝජනා ${app.suggestions.length}')),
+          style: OutlinedButton.styleFrom(minimumSize: const Size(double.infinity, 46)),
+        ),
         if (missed > 0) ...[
           const SizedBox(height: 10),
           FilledButton.icon(
@@ -451,7 +588,7 @@ class _AIPlannerScreenState extends State<AIPlannerScreen> {
     final steps = [
       (app.t('Score', 'ලකුණු'), app.t('Urgency 40% · Difficulty 25% · Workload 20% · Struggle 15%', 'ආසන්නභාවය 40% · අපහසුතාව 25% · වැඩ 20% · අපහසුතා 15%')),
       (app.t('Fit', 'යෙදීම'), app.t('Fills only your free time, hardest subjects first', 'ඔබේ නිදහස් කාලය පමණි, අපහසුම විෂයයන් මුලින්')),
-      (app.t('Space', 'පරතරය'), app.t('Learn → practice → review, past papers near exams', 'ඉගෙනීම → අභ්‍යාස → පුනරීක්ෂණය')),
+      (app.t('Space', 'පරතරය'), app.t('Learn, then practise, then review; past papers near exams', 'ඉගෙනීම, අභ්‍යාස, පසුව පුනරීක්ෂණය')),
       (app.t('Adapt', 'අනුවර්තනය'), app.t('Learns from missed sessions and focus ratings', 'මඟහැරුණු සැසි සහ අවධාන ලකුණු වලින් ඉගෙන ගනී')),
     ];
     return AppCard(

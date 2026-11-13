@@ -56,25 +56,19 @@ class AvailabilityEditor extends StatelessWidget {
                 child: Text(
                   prefs.availability[i] == 0 ? app.t('Off', 'නැත') : fmtMinutes(prefs.availability[i]),
                   textAlign: TextAlign.right,
-                  style: ts(12.5, w: FontWeight.w800,
-                      c: prefs.availability[i] == 0 ? p.textMuted : AppColors.primary),
+                  style: ts(12.5, w: FontWeight.w800, c: prefs.availability[i] == 0 ? p.textMuted : AppColors.primary),
                 ),
               ),
             ]),
         ]),
       ),
       const SizedBox(height: 20),
-      Text(app.t('Best time for you to study', 'ඔබට ඉගෙනීමට හොඳම කාලය'),
-          style: ts(14, w: FontWeight.w800, c: p.text)),
+      Text(app.t('Best time for you to study', 'ඔබට ඉගෙනීමට හොඳම කාලය'), style: ts(14, w: FontWeight.w800, c: p.text)),
       const SizedBox(height: 10),
-      GridView.count(
-              padding: EdgeInsets.zero,
-        crossAxisCount: 2,
-        shrinkWrap: true,
-        physics: const NeverScrollableScrollPhysics(),
-        mainAxisSpacing: 10,
-        crossAxisSpacing: 10,
-        childAspectRatio: 2.5,
+      FlexGrid(
+        columns: 2,
+        spacing: 10,
+        runSpacing: 10,
         children: [
           for (final w in windows)
             _ChoiceTile(
@@ -145,13 +139,22 @@ class StudyStyleEditor extends StatelessWidget {
         );
 
     return Column(children: [
-      block(Icons.timer_outlined, AppColors.primary, app.t('Session length', 'සැසියක දිග'),
+      block(
+          Icons.timer_outlined,
+          AppColors.primary,
+          app.t('Session length', 'සැසියක දිග'),
           app.t('How long you can focus in one go', 'එක වරකට අවධානය යොමු කළ හැකි කාලය'),
           chips([25, 45, 50, 60, 90], prefs.sessionMinutes, (v) => prefs.sessionMinutes = v, (v) => '$v min')),
-      block(Icons.free_breakfast_outlined, AppColors.teal, app.t('Break between sessions', 'සැසි අතර විවේකය'),
+      block(
+          Icons.free_breakfast_outlined,
+          AppColors.teal,
+          app.t('Break between sessions', 'සැසි අතර විවේකය'),
           app.t('Short breaks improve retention', 'කෙටි විවේක මතකය වැඩි කරයි'),
           chips([5, 10, 15, 20], prefs.breakMinutes, (v) => prefs.breakMinutes = v, (v) => '$v min')),
-      block(Icons.flag_outlined, AppColors.amber, app.t('Daily study goal', 'දෛනික ඉලක්කය'),
+      block(
+          Icons.flag_outlined,
+          AppColors.amber,
+          app.t('Daily study goal', 'දෛනික ඉලක්කය'),
           app.t('Used for your progress ring', 'ප්‍රගති වළල්ල සඳහා භාවිතා වේ'),
           Row(children: [
             Expanded(
@@ -168,10 +171,12 @@ class StudyStyleEditor extends StatelessWidget {
             ),
             Pill(fmtMinutes(prefs.dailyGoalMinutes), AppColors.amber),
           ])),
-      block(Icons.date_range_outlined, AppColors.violet, app.t('Plan ahead', 'ඉදිරියට සැලසුම් කරන්න'),
+      block(
+          Icons.date_range_outlined,
+          AppColors.violet,
+          app.t('Plan ahead', 'ඉදිරියට සැලසුම් කරන්න'),
           app.t('How many days the AI plans at once', 'AI එක වරකට සැලසුම් කරන දින ගණන'),
-          chips([7, 14], prefs.planHorizonDays, (v) => prefs.planHorizonDays = v,
-              (v) => app.t('$v days', 'දින $v'))),
+          chips([7, 14], prefs.planHorizonDays, (v) => prefs.planHorizonDays = v, (v) => app.t('$v days', 'දින $v'))),
     ]);
   }
 }
@@ -181,7 +186,8 @@ class _ChoiceTile extends StatelessWidget {
   final String title, subtitle;
   final bool selected;
   final VoidCallback onTap;
-  const _ChoiceTile({required this.icon, required this.title, required this.subtitle, required this.selected, required this.onTap});
+  const _ChoiceTile(
+      {required this.icon, required this.title, required this.subtitle, required this.selected, required this.onTap});
 
   @override
   Widget build(BuildContext context) {
@@ -190,7 +196,7 @@ class _ChoiceTile extends StatelessWidget {
       onTap: onTap,
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 200),
-        padding: const EdgeInsets.symmetric(horizontal: 12),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
         decoration: BoxDecoration(
           color: selected ? AppColors.primary.withOpacity(0.1) : p.surface,
           borderRadius: BorderRadius.circular(16),
@@ -200,11 +206,17 @@ class _ChoiceTile extends StatelessWidget {
           Icon(icon, color: selected ? AppColors.primary : p.textMuted, size: 22),
           const SizedBox(width: 10),
           Expanded(
-            child: Column(mainAxisAlignment: MainAxisAlignment.center, crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Text(title, maxLines: 1, overflow: TextOverflow.ellipsis,
-                  style: ts(13, w: FontWeight.w800, c: selected ? AppColors.primary : p.text)),
-              Text(subtitle, maxLines: 1, overflow: TextOverflow.ellipsis, style: ts(11, c: p.textMuted)),
-            ]),
+            child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  FittedBox(
+                      fit: BoxFit.scaleDown,
+                      alignment: Alignment.centerLeft,
+                      child: Text(title,
+                          maxLines: 1, style: ts(13, w: FontWeight.w800, c: selected ? AppColors.primary : p.text))),
+                  Text(subtitle, maxLines: 1, overflow: TextOverflow.ellipsis, style: ts(11, c: p.textMuted)),
+                ]),
           ),
         ]),
       ),

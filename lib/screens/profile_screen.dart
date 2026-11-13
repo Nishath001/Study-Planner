@@ -7,6 +7,7 @@ import '../state/app_state.dart';
 import '../theme/app_theme.dart';
 import '../widgets/pref_editors.dart';
 import '../widgets/ui.dart';
+import 'data_inspector_screen.dart';
 import 'subjects_screen.dart';
 import 'survey_screen.dart';
 
@@ -130,18 +131,6 @@ class ProfileScreen extends StatelessWidget {
             ),
           ]),
 
-          _Group(title: app.t('AI engine', 'AI එන්ජිම'), children: [
-            _Tile(
-              icon: Icons.cloud_rounded,
-              color: AppColors.sky,
-              title: app.t('Claude API key (optional)', 'Claude API key (අත්‍යවශ්‍ය නැත)'),
-              subtitle: app.claudeKey.isEmpty
-                  ? app.t('Not set — on-device AI is used', 'සකසා නැත — උපාංග AI භාවිතා වේ')
-                  : '••••${app.claudeKey.substring(app.claudeKey.length - 4)}',
-              onTap: () => _editKey(context, app),
-            ),
-          ]),
-
           _Group(title: app.t('Research participation', 'පර්යේෂණ සහභාගීත්වය'), children: [
             _Tile(
               icon: Icons.verified_user_rounded,
@@ -169,7 +158,67 @@ class ProfileScreen extends StatelessWidget {
             ),
           ]),
 
+          _Group(title: app.t('Cloud & storage', 'වලාකුළු සහ ගබඩාව'), children: [
+            _Tile(
+              icon: app.isCloudUser
+                  ? (app.cloudError == null ? Icons.cloud_done_rounded : Icons.cloud_sync_rounded)
+                  : Icons.cloud_off_rounded,
+              color: app.isCloudUser ? (app.cloudError == null ? AppColors.green : AppColors.amber) : p.textMuted,
+              title: app.t('Cloud backup (Firebase)', 'වලාකුළු උපස්ථය (Firebase)'),
+              subtitle: !app.cloudEnabled
+                  ? app.t('Off — Firebase not set up. Data stays on this phone.', 'අක්‍රියයි — Firebase සකසා නැත. දත්ත මෙම දුරකථනයේ පමණි.')
+                  : u.isGuest
+                      ? app.t('Create an account to back up your data', 'දත්ත උපස්ථ කිරීමට ගිණුමක් සාදන්න')
+                      : app.cloudError != null
+                          ? app.t('Waiting for internet — changes are saved on this phone', 'අන්තර්ජාලය එනතුරු — වෙනස්කම් දුරකථනයේ සුරකින ලදී')
+                          : app.lastCloudSync == null
+                              ? app.t('Syncing…', 'සමමුහුර්ත වෙමින්…')
+                              : app.t('Synced at ${fmtTime(context, app.lastCloudSync!)}', '${fmtTime(context, app.lastCloudSync!)} ට සමමුහුර්ත විය'),
+              trailing: app.isCloudUser
+                  ? TextButton(
+                      onPressed: () async {
+                        await app.syncNow();
+                        if (!context.mounted) return;
+                        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                            content: Text(app.cloudError == null
+                                ? app.t('Your data is backed up', 'ඔබේ දත්ත උපස්ථ කර ඇත')
+                                : app.t('Offline — will sync when connected', 'නොබැඳි — සම්බන්ධ වූ විට සමමුහුර්ත වේ'))));
+                      },
+                      child: Text(app.t('Sync now', 'දැන් සමමුහුර්ත කරන්න')),
+                    )
+                  : null,
+            ),
+            _Tile(
+              icon: Icons.storage_rounded,
+              color: AppColors.sky,
+              title: app.t('On-device storage', 'උපාංග ගබඩාව'),
+              subtitle: app.usesSqlite
+                  ? app.t('SQLite database · works offline', 'SQLite දත්ත සමුදාය · නොබැඳිව ක්‍රියා කරයි')
+                  : app.t('Browser storage (web demo)', 'බ්‍රවුසර ගබඩාව (වෙබ් ආදර්ශනය)'),
+            ),
+            _Tile(
+              icon: Icons.table_chart_rounded,
+              color: AppColors.violet,
+              title: app.t('View database & cloud', 'දත්ත සමුදාය සහ වලාකුළ බලන්න'),
+              subtitle: app.t('SQLite tables and Firebase sync status', 'SQLite වගු සහ Firebase තත්ත්වය'),
+              onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const DataInspectorScreen())),
+            ),
+          ]),
+
           _Group(title: app.t('Account', 'ගිණුම'), children: [
+            if (!u.isGuest && !app.cloudEnabled)
+              _Tile(
+                icon: Icons.lock_reset_rounded,
+                color: app.hasRecovery ? AppColors.green : AppColors.rose,
+                title: app.t('Password recovery', 'මුරපද ප්‍රතිසාධනය'),
+                subtitle: app.hasRecovery
+                    ? app.securityQuestion(app.recoveryQuestionId!)
+                    : app.t('Not set — add a security question', 'සකසා නැත — ආරක්ෂක ප්‍රශ්නයක් එක් කරන්න'),
+                onTap: () => showDialog(
+                  context: context,
+                  builder: (_) => ChangeNotifierProvider.value(value: app, child: const _RecoveryDialog()),
+                ),
+              ),
             _Tile(
               icon: Icons.restart_alt_rounded,
               color: AppColors.amber,
@@ -252,34 +301,6 @@ class ProfileScreen extends StatelessWidget {
         ),
       ),
     );
-  }
-
-  Future<void> _editKey(BuildContext context, AppState app) async {
-    final c = TextEditingController(text: app.claudeKey);
-    final saved = await showDialog<String>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: Text(app.t('Claude API key', 'Claude API key')),
-        content: Column(mainAxisSize: MainAxisSize.min, children: [
-          Text(
-            app.t('Optional. With a key, the planner can use Claude in the cloud. The key is stored only on this device.',
-                'අත්‍යවශ්‍ය නැත. key එකක් සමඟ සැලසුම්කරුට Claude භාවිතා කළ හැක. එය මෙම උපාංගයේ පමණක් ගබඩා වේ.'),
-            style: ts(13, c: ctx.pal.textSoft, h: 1.45),
-          ),
-          const SizedBox(height: 14),
-          TextField(controller: c, obscureText: true, decoration: const InputDecoration(hintText: 'sk-ant-…')),
-        ]),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, ''), child: Text(app.t('Remove', 'ඉවත් කරන්න'))),
-          FilledButton(
-            onPressed: () => Navigator.pop(ctx, c.text),
-            style: FilledButton.styleFrom(minimumSize: const Size(0, 44)),
-            child: Text(app.t('Save', 'සුරකින්න')),
-          ),
-        ],
-      ),
-    );
-    if (saved != null) await app.setClaudeKey(saved);
   }
 
   Future<void> _export(BuildContext context, AppState app) async {
@@ -370,6 +391,107 @@ class _Tile extends StatelessWidget {
           if (trailing != null) trailing! else if (onTap != null) Icon(Icons.chevron_right_rounded, color: p.textMuted),
         ]),
       ),
+    );
+  }
+}
+
+
+/// Add or change the security question used by "Forgot password?".
+class _RecoveryDialog extends StatefulWidget {
+  const _RecoveryDialog();
+
+  @override
+  State<_RecoveryDialog> createState() => _RecoveryDialogState();
+}
+
+class _RecoveryDialogState extends State<_RecoveryDialog> {
+  late int? _q = context.read<AppState>().recoveryQuestionId;
+  final _answer = TextEditingController();
+  final _pass = TextEditingController();
+  String? _error;
+  bool _busy = false;
+
+  @override
+  void dispose() {
+    _answer.dispose();
+    _pass.dispose();
+    super.dispose();
+  }
+
+  Future<void> _save() async {
+    final app = context.read<AppState>();
+    if (_q == null) {
+      setState(() => _error = app.t('Choose a question.', 'ප්‍රශ්නයක් තෝරන්න.'));
+      return;
+    }
+    setState(() => _busy = true);
+    final err = await app.setRecovery(_pass.text, _q!, _answer.text);
+    if (!mounted) return;
+    if (err == null) {
+      Navigator.pop(context);
+      ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(app.t('Security question saved', 'ආරක්ෂක ප්‍රශ්නය සුරකින ලදී'))));
+      return;
+    }
+    setState(() {
+      _busy = false;
+      _error = switch (err) {
+        'wrong' => app.t('Current password is incorrect.', 'වත්මන් මුරපදය වැරදියි.'),
+        'answer' => app.t('Please enter an answer.', 'පිළිතුරක් ඇතුළත් කරන්න.'),
+        _ => app.t('Something went wrong.', 'දෝෂයක් සිදුවිය.'),
+      };
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final app = context.watch<AppState>();
+    final p = context.pal;
+    return AlertDialog(
+      title: Text(app.t('Password recovery', 'මුරපද ප්‍රතිසාධනය')),
+      content: SizedBox(
+        width: 400,
+        child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+          Text(app.t('If you forget your password, you can reset it by answering this question.',
+                  'මුරපදය අමතක වුවහොත්, මෙම ප්‍රශ්නයට පිළිතුරු දී එය යළි සැකසිය හැක.'),
+              style: ts(13, c: p.textSoft, h: 1.45)),
+          const SizedBox(height: 14),
+          DropdownButtonFormField<int>(
+            value: _q,
+            isExpanded: true,
+            dropdownColor: p.surface,
+            decoration: InputDecoration(hintText: app.t('Security question', 'ආරක්ෂක ප්‍රශ්නය')),
+            items: [
+              for (var i = 0; i < 6; i++)
+                DropdownMenuItem(
+                  value: i,
+                  child: Text(app.securityQuestion(i), maxLines: 2, overflow: TextOverflow.ellipsis, style: ts(13, c: p.text)),
+                ),
+            ],
+            onChanged: (v) => setState(() => _q = v),
+          ),
+          const SizedBox(height: 12),
+          TextField(controller: _answer, decoration: InputDecoration(hintText: app.t('Answer', 'පිළිතුර'))),
+          const SizedBox(height: 12),
+          TextField(
+            controller: _pass,
+            obscureText: true,
+            decoration: InputDecoration(hintText: app.t('Current password', 'වත්මන් මුරපදය')),
+          ),
+          if (_error != null) ...[
+            const SizedBox(height: 10),
+            Text(_error!, style: ts(12.5, w: FontWeight.w600, c: AppColors.rose)),
+          ],
+        ]),
+      ),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(context), child: Text(app.t('Cancel', 'අවලංගු'))),
+        FilledButton(
+          onPressed: _busy ? null : _save,
+          style: FilledButton.styleFrom(minimumSize: const Size(0, 44)),
+          child: Text(app.t('Save', 'සුරකින්න')),
+        ),
+      ],
     );
   }
 }

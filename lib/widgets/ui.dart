@@ -152,7 +152,11 @@ class Pill extends StatelessWidget {
             Icon(icon, size: 13, color: solid ? Colors.white : color),
             const SizedBox(width: 4),
           ],
-          Text(text, style: ts(11.5, w: FontWeight.w700, c: solid ? Colors.white : color)),
+          // Long labels shrink to the available width instead of spilling out of the pill.
+          Flexible(
+            child: Text(text, maxLines: 1, overflow: TextOverflow.ellipsis,
+                style: ts(11.5, w: FontWeight.w700, c: solid ? Colors.white : color)),
+          ),
         ]),
       );
 }
@@ -177,8 +181,8 @@ class StatTile extends StatelessWidget {
           child: Text(value, style: ts(20, w: FontWeight.w800, c: p.text)),
         ),
         const SizedBox(height: 2),
-        Text(label, maxLines: 1, overflow: TextOverflow.ellipsis,
-            style: ts(11.5, w: FontWeight.w600, c: p.textMuted)),
+        Text(label, maxLines: 2, overflow: TextOverflow.ellipsis,
+            style: ts(11.5, w: FontWeight.w600, c: p.textMuted, h: 1.3)),
       ]),
     );
   }
@@ -562,5 +566,31 @@ class Avatar extends StatelessWidget {
       decoration: const BoxDecoration(shape: BoxShape.circle, gradient: AppColors.brandGradient),
       child: Center(child: Text(initials, style: ts(size * 0.36, w: FontWeight.w800, c: Colors.white))),
     );
+  }
+}
+
+
+/// Grid whose rows take the height of their tallest item, so content never
+/// overflows on narrow phones or with large system text (unlike a fixed
+/// childAspectRatio GridView). Cells in a row share equal width and height.
+class FlexGrid extends StatelessWidget {
+  final int columns;
+  final double spacing, runSpacing;
+  final List<Widget> children;
+  const FlexGrid({super.key, required this.columns, required this.children, this.spacing = 12, this.runSpacing = 12});
+
+  @override
+  Widget build(BuildContext context) {
+    final rows = <Widget>[];
+    for (var i = 0; i < children.length; i += columns) {
+      final cells = <Widget>[];
+      for (var j = 0; j < columns; j++) {
+        if (j > 0) cells.add(SizedBox(width: spacing));
+        cells.add(Expanded(child: i + j < children.length ? children[i + j] : const SizedBox()));
+      }
+      if (rows.isNotEmpty) rows.add(SizedBox(height: runSpacing));
+      rows.add(IntrinsicHeight(child: Row(crossAxisAlignment: CrossAxisAlignment.stretch, children: cells)));
+    }
+    return Column(mainAxisSize: MainAxisSize.min, children: rows);
   }
 }

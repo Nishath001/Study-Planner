@@ -4,10 +4,11 @@ import 'package:flutter/material.dart';
 
 import '../models/models.dart';
 import '../services/auth_service.dart';
-import '../services/claude_service.dart';
+import '../services/cloud_service.dart';
 import '../services/notification_service.dart';
 import '../services/scheduler_engine.dart';
 import '../services/storage_service.dart';
+import '../services/suggestion_engine.dart';
 import '../theme/app_theme.dart';
 
 class Achievement {
@@ -23,6 +24,14 @@ class Achievement {
 class AppState extends ChangeNotifier {
   final _store = StorageService.instance;
   final _auth = AuthService.instance;
+  final _cloud = CloudService.instance;
+
+  /// Firebase is configured: Firebase login, reset emails, Firestore sync.
+  bool get cloudEnabled => _cloud.enabled;
+  bool get isCloudUser => cloudEnabled && user != null && !user!.isGuest;
+  DateTime? get lastCloudSync => _cloud.lastSync;
+  String? get cloudError => _cloud.lastError;
+  bool get usesSqlite => _store.usesSqlite;
   final _engine = SchedulerEngine();
   final _notify = NotificationService.instance;
 
@@ -37,11 +46,14 @@ class AppState extends ChangeNotifier {
   List<StudyTask> tasks = [];
   List<StudySession> sessions = [];
   List<SurveyResponse> surveys = [];
+  List<DailyTask> dailyTasks = [];
   StudyPreferences prefs = StudyPreferences();
   bool setupDone = false;
   bool researchConsent = false;
   String claudeKey = '';
   Set<String> flags = {};
+  Map<SuggestionType, FeedbackStat> suggestionFeedback = {};
+  Map<String, DateTime> dismissedSuggestions = {};
 
   PlanResult? lastPlan;
   bool planning = false;
@@ -57,25 +69,47 @@ class AppState extends ChangeNotifier {
     themeMode = ThemeMode.values[app.get('theme', defaultValue: 0)];
     onboardingSeen = app.get('onboarding', defaultValue: false);
     await _notify.init();
-    user = _auth.restore();
+    // Guest session is local; otherwise Firebase's signed-in user, else a local account.
+    final session = _store.app.get('session_uid') as String?;
+    user = session == 'guest' ? AuthService.guestUser : (_cloud.currentUser ?? (cloudEnabled ? null : _auth.restore()));
     if (user != null) await _loadUser();
     notifyListeners();
   }
 
   Future<void> _loadUser() async {
     await _store.openUser(user!.id);
+    // Signed-in Firebase students: merge their cloud copy into SQLite, then keep it in sync.
+    if (isCloudUser) {
+      await _cloud.attach(user!.id);
+    } else {
+      _cloud.detach();
+    }
     subjects = _store.readList('subjects').map(Subject.fromJson).toList();
     tasks = _store.readList('tasks').map(StudyTask.fromJson).toList();
     sessions = _store.readList('sessions').map(StudySession.fromJson).toList();
     surveys = _store.readList('surveys').map(SurveyResponse.fromJson).toList();
+    dailyTasks = _store.readList('dailyTasks').map(DailyTask.fromJson).toList();
     final p = _store.readMap('prefs');
     prefs = p == null ? StudyPreferences() : StudyPreferences.fromJson(p);
     setupDone = _store.read<bool>('setupDone') ?? false;
     researchConsent = _store.read<bool>('consent') ?? false;
     claudeKey = _store.read<String>('claudeKey') ?? '';
     flags = (_store.read<String>('flags') ?? '').split(',').where((s) => s.isNotEmpty).toSet();
+    final fb = _store.readMap('sugFeedback') ?? {};
+    suggestionFeedback = {
+      for (final e in fb.entries)
+        for (final t in SuggestionType.values)
+          if (t.name == e.key) t: FeedbackStat.fromJson(e.value as List),
+    };
+    final dm = _store.readMap('sugDismissed') ?? {};
+    dismissedSuggestions = {for (final e in dm.entries) e.key: DateTime.parse(e.value as String)};
     markMissed(save: false);
     await _saveTasks();
+    // Ask once for notification permission, right after the first sign-in.
+    if (!(_store.read<bool>('notifAsked') ?? false)) {
+      await _store.write('notifAsked', true);
+      await _notify.requestPermission();
+    }
   }
 
   // ── Persistence helpers ─────────────────────────────────────────────────
@@ -103,7 +137,176 @@ class AppState extends ChangeNotifier {
         subjects: {for (final s in subjects) s.id: s},
         prefs: prefs,
         t: t,
+        daily: dailyTasks,
       );
+
+  // ── Daily task management ───────────────────────────────────────────────
+  Future<void> _saveDaily() async {
+    await _store.writeList('dailyTasks', dailyTasks.map((x) => x.toJson()).toList());
+    await syncReminders();
+  }
+
+  /// Tasks for a day: open ones first (high priority, then earliest due), done last.
+  List<DailyTask> dailyFor(DateTime day) {
+    final list = dailyTasks.where((x) => x.occursOn(day)).toList();
+    int rank(DailyTask x) => x.doneOn(day) ? 1 : 0;
+    list.sort((a, b) {
+      final r = rank(a).compareTo(rank(b));
+      if (r != 0) return r;
+      final p = b.priority.index.compareTo(a.priority.index);
+      if (p != 0) return p;
+      return (a.dueMinutes ?? 9999).compareTo(b.dueMinutes ?? 9999);
+    });
+    return list;
+  }
+
+  List<DailyTask> get overdueDaily =>
+      dailyTasks.where((x) => x.isOverdue(DateTime.now())).toList()
+        ..sort((a, b) => b.priority.index.compareTo(a.priority.index));
+
+  /// (done, total) for a day.
+  (int, int) dailyProgress(DateTime day) {
+    final list = dailyTasks.where((x) => x.occursOn(day)).toList();
+    return (list.where((x) => x.doneOn(day)).length, list.length);
+  }
+
+  int get dailyDoneThisWeek {
+    final today = dateOnly(DateTime.now());
+    var n = 0;
+    for (var i = 0; i < 7; i++) {
+      n += dailyProgress(today.subtract(Duration(days: i))).$1;
+    }
+    return n;
+  }
+
+  Future<void> upsertDaily(DailyTask x) async {
+    final i = dailyTasks.indexWhere((y) => y.id == x.id);
+    i == -1 ? dailyTasks.add(x) : dailyTasks[i] = x;
+    await _saveDaily();
+    notifyListeners();
+  }
+
+  Future<void> addQuickDaily(String title, {DateTime? day}) async {
+    final t = title.trim();
+    if (t.isEmpty) return;
+    await upsertDaily(DailyTask(
+      id: 'd_${DateTime.now().microsecondsSinceEpoch}',
+      title: t,
+      date: day ?? DateTime.now(),
+    ));
+  }
+
+  Future<void> deleteDaily(String id) async {
+    dailyTasks.removeWhere((x) => x.id == id);
+    await _saveDaily();
+    notifyListeners();
+  }
+
+  Future<void> toggleDaily(DailyTask x, DateTime day) async {
+    final k = dayKey(day);
+    if (!x.doneDates.remove(k)) {
+      x.doneDates.add(k);
+      for (final s in x.subtasks) {
+        s.doneDates.add(k); // finishing the task finishes its steps
+      }
+      await _flag('dailyTask');
+    }
+    await _saveDaily();
+    notifyListeners();
+  }
+
+  Future<void> toggleSubtask(DailyTask x, int index, DateTime day) async {
+    final k = dayKey(day);
+    final s = x.subtasks[index];
+    if (!s.doneDates.remove(k)) s.doneDates.add(k);
+    // All steps ticked → the task is done; un-ticking one reopens it.
+    if (x.subtasks.every((y) => y.doneOn(day))) {
+      x.doneDates.add(k);
+    } else {
+      x.doneDates.remove(k);
+    }
+    await _saveDaily();
+    notifyListeners();
+  }
+
+  Future<void> moveDailyToToday(Iterable<DailyTask> list) async {
+    for (final x in list) {
+      x.date = dateOnly(DateTime.now());
+    }
+    await _saveDaily();
+    notifyListeners();
+  }
+
+  // ── Smart suggestions ───────────────────────────────────────────────────
+  final _suggester = SuggestionEngine();
+  List<Suggestion>? _suggestionCache;
+
+  @override
+  void notifyListeners() {
+    _styleCache = null;
+    _suggestionCache = null; // recompute after any change
+    super.notifyListeners();
+  }
+
+  /// Improvement suggestions for the current plan, ranked by expected
+  /// benefit × how often this student accepts that kind of advice.
+  List<Suggestion> get suggestions => _suggestionCache ??= user == null
+      ? []
+      : _suggester.generate(
+          subjects: subjects,
+          tasks: tasks,
+          sessions: sessions,
+          prefs: prefs,
+          feedback: suggestionFeedback,
+          dismissed: dismissedSuggestions,
+          t: t,
+          typeLabel: typeLabel,
+        );
+
+  Future<void> applySuggestion(Suggestion s) async {
+    for (final a in s.actions) {
+      final i = a.taskId == null ? -1 : tasks.indexWhere((x) => x.id == a.taskId);
+      switch (a.kind) {
+        case 'move' when i != -1:
+          tasks[i]
+            ..start = a.newStart!
+            ..status = TaskStatus.pending;
+        case 'split' when i != -1:
+          final x = tasks[i]..durationMinutes = a.newDuration!;
+          tasks.add(StudyTask.fromJson({
+            ...x.toJson(),
+            'id': '${x.id}_p2',
+            'title': '${x.title} (2/2)',
+            'start': a.splitStart!.toIso8601String(),
+            'duration': a.splitDuration,
+          }));
+        case 'add':
+          tasks.add(a.newTask!);
+        case 'prefs':
+          if (a.sessionMinutes != null) prefs.sessionMinutes = a.sessionMinutes!;
+          if (a.window != null) prefs.window = a.window!;
+          await _store.writeMap('prefs', prefs.toJson());
+      }
+    }
+    (suggestionFeedback[s.type] ??= FeedbackStat()).accepted++;
+    await _saveFeedback();
+    await _saveTasks();
+    await _flag('suggestion');
+    notifyListeners();
+  }
+
+  Future<void> dismissSuggestion(Suggestion s) async {
+    (suggestionFeedback[s.type] ??= FeedbackStat()).rejected++;
+    dismissedSuggestions[s.id] = DateTime.now();
+    await _saveFeedback();
+    notifyListeners();
+  }
+
+  Future<void> _saveFeedback() async {
+    await _store.writeMap('sugFeedback', {for (final e in suggestionFeedback.entries) e.key.name: e.value.toJson()});
+    await _store.writeMap('sugDismissed',
+        {for (final e in dismissedSuggestions.entries) e.key: e.value.toIso8601String()});
+  }
 
   // ── Settings ────────────────────────────────────────────────────────────
   Future<void> setLanguage(String lang) async {
@@ -157,22 +360,45 @@ class AppState extends ChangeNotifier {
 
   // ── Auth ────────────────────────────────────────────────────────────────
   Future<String?> signIn(String email, String password) async {
-    final (u, err) = await _auth.signIn(email, password);
+    final (u, err) = cloudEnabled ? await _cloud.signIn(email, password) : await _auth.signIn(email, password);
     if (u == null) return err;
+    if (cloudEnabled) await _store.app.delete('session_uid'); // Firebase keeps the session
     user = u;
     await _loadUser();
     notifyListeners();
     return null;
   }
 
-  Future<String?> register(String name, String email, String password) async {
-    final (u, err) = await _auth.register(name, email, password);
-    if (u == null) return err;
-    user = u;
-    await _loadUser();
-    notifyListeners();
-    return null;
+  /// Creates the account only. The student is sent to Sign in afterwards.
+  Future<String?> register(String name, String email, String password,
+      {int? questionId, String answer = ''}) async {
+    if (cloudEnabled) return _cloud.register(name, email, password);
+    final (u, err) = await _auth.register(name, email, password, questionId: questionId, answer: answer);
+    return u == null ? err : null;
   }
+
+  // Forgot password — see AuthService for error codes.
+  (int?, String?) recoveryQuestion(String email) => _auth.recoveryQuestion(email);
+  Future<String?> resetPassword(String email, String answer, String newPassword) =>
+      _auth.resetPassword(email, answer, newPassword);
+  bool get hasRecovery => user != null && !user!.isGuest && _auth.hasRecovery(user!.email);
+  int? get recoveryQuestionId => user == null || user!.isGuest ? null : _auth.questionOf(user!.email);
+
+  Future<String?> setRecovery(String password, int questionId, String answer) async {
+    final err = await _auth.setRecovery(user!.email, password, questionId, answer);
+    notifyListeners();
+    return err;
+  }
+
+  /// Bilingual security questions (index = stored question id).
+  String securityQuestion(int id) => switch (id) {
+        0 => t('What was the name of your first school?', 'ඔබේ පළමු පාසලේ නම කුමක්ද?'),
+        1 => t("What is your favourite teacher's name?", 'ඔබේ ප්‍රියතම ගුරුවරයාගේ නම කුමක්ද?'),
+        2 => t('In which city were you born?', 'ඔබ ඉපදුණු නගරය කුමක්ද?'),
+        3 => t('What was the name of your first pet?', 'ඔබේ පළමු සුරතල් සතාගේ නම කුමක්ද?'),
+        4 => t("What is your mother's maiden name?", 'ඔබේ මවගේ විවාහයට පෙර වාසගම කුමක්ද?'),
+        _ => t('What is your favourite food?', 'ඔබේ ප්‍රියතම ආහාරය කුමක්ද?'),
+      };
 
   Future<void> continueAsGuest() async {
     user = await _auth.continueAsGuest();
@@ -180,7 +406,17 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Firebase mode: sends a password-reset email.
+  Future<String?> sendPasswordReset(String email) => _cloud.sendPasswordReset(email);
+
+  Future<void> syncNow() async {
+    await _cloud.pull();
+    if (user != null) await _loadUser();
+    notifyListeners();
+  }
+
   Future<void> signOut() async {
+    await _cloud.signOut();
     await _auth.signOut();
     await _store.closeUser();
     user = null;
@@ -188,6 +424,7 @@ class AppState extends ChangeNotifier {
     tasks = [];
     sessions = [];
     surveys = [];
+    dailyTasks = [];
     lastPlan = null;
     notifyListeners();
   }
@@ -360,39 +597,62 @@ class AppState extends ChangeNotifier {
         Difficulty.hard => t('Hard', 'අපහසු'),
       };
 
-  List<SubjectInsight> get insights => _engine.analyse(subjects, tasks, sessions);
+  List<SubjectInsight> get insights => _engine.analyse(subjects, tasks, sessions, mode: prefs.planMode);
+
+  Future<void> setPlanMode(PlanMode m) async {
+    prefs.planMode = m;
+    await savePrefs(prefs);
+  }
+
+  Map<PlanMode, PlanResult>? _styleCache;
+
+  /// What each planning style would produce right now, so the student can
+  /// compare them before generating. Recomputed after any change.
+  Map<PlanMode, PlanResult> get stylePreviews => _styleCache ??= {
+        for (final m in PlanMode.values)
+          m: _engine.generate(
+            subjects: subjects,
+            existing: tasks,
+            sessions: sessions,
+            prefs: StudyPreferences.fromJson({...prefs.toJson(), 'mode': m.name}),
+            typeLabel: typeLabel,
+          ),
+      };
+
+  /// Minutes per subject in a plan, largest first.
+  List<(Subject, int, int)> minutesBySubject(PlanResult plan) {
+    final mins = <String, int>{}, count = <String, int>{};
+    for (final x in plan.tasks) {
+      mins[x.subjectId] = (mins[x.subjectId] ?? 0) + x.durationMinutes;
+      count[x.subjectId] = (count[x.subjectId] ?? 0) + 1;
+    }
+    final out = [
+      for (final s in subjects.where((s) => !s.examPassed)) (s, mins[s.id] ?? 0, count[s.id] ?? 0),
+    ]..sort((a, b) => b.$2.compareTo(a.$2));
+    return out;
+  }
+
+  String planModeLabel(PlanMode m) => switch (m) {
+        PlanMode.balanced => t('Balanced', 'සමබර'),
+        PlanMode.examFocus => t('Exam focus', 'විභාග අවධානය'),
+        PlanMode.light => t('Light week', 'සැහැල්ලු සතිය'),
+      };
   double get adherence => _engine.adherence(tasks);
 
   /// Builds a plan preview. Nothing is saved until [applyPlan].
-  Future<PlanResult?> buildPlan({bool useClaude = false}) async {
+  Future<PlanResult?> buildPlan() async {
     planning = true;
     planError = null;
     notifyListeners();
     markMissed(save: false);
     try {
-      PlanResult result = _engine.generate(
+      final result = _engine.generate(
         subjects: subjects,
         existing: tasks,
         sessions: sessions,
         prefs: prefs,
         typeLabel: typeLabel,
       );
-      if (useClaude && claudeKey.isNotEmpty && result.insights.isNotEmpty) {
-        try {
-          result = await ClaudeService.instance.generate(
-            apiKey: claudeKey,
-            insights: _engine.analyse(subjects, tasks, sessions),
-            prefs: prefs,
-            adherence: result.adherence,
-            loadFactor: result.loadFactor,
-            language: language,
-            typeLabel: typeLabel,
-          );
-        } catch (e) {
-          planError = t('Claude unavailable ($e). Showing the on-device plan.',
-              'Claude ලබාගත නොහැක. උපාංගයේ සැලැස්ම පෙන්වයි.');
-        }
-      }
       // Give the planner a beat so the UI can show its thinking state.
       await Future.delayed(const Duration(milliseconds: 900));
       lastPlan = result;
@@ -560,6 +820,8 @@ class AppState extends ChangeNotifier {
         'adherence14d': double.parse(adherence.toStringAsFixed(3)),
         'bestStreak': bestStreak,
         'avgFocus': avgFocus,
+        'dailyTasks': dailyTasks.length,
+        'dailyTasksDoneThisWeek': dailyDoneThisWeek,
       },
       'subjects': subjects
           .map((s) => {

@@ -28,14 +28,8 @@ class InsightsScreen extends StatelessWidget {
             const SizedBox(height: 4),
             Text(app.t('Your study habits at a glance', 'ඔබේ අධ්‍යයන පුරුදු එක බැල්මකින්'), style: ts(13, c: p.textMuted)),
             const SizedBox(height: 18),
-            GridView.count(
-              padding: EdgeInsets.zero,
-              crossAxisCount: 2,
-              shrinkWrap: true,
-              physics: const NeverScrollableScrollPhysics(),
-              mainAxisSpacing: 12,
-              crossAxisSpacing: 12,
-              childAspectRatio: 1.45,
+            FlexGrid(
+              columns: 2,
               children: [
                 StatTile(icon: Icons.hourglass_bottom_rounded, color: AppColors.primary,
                     value: fmtMinutes(app.totalMinutes), label: app.t('Total study time', 'මුළු අධ්‍යයන කාලය')),
@@ -56,14 +50,10 @@ class InsightsScreen extends StatelessWidget {
               const SizedBox(height: 22),
             ],
             SectionHeader(app.t('Achievements', 'ජයග්‍රහණ')),
-            GridView.count(
-              padding: EdgeInsets.zero,
-              crossAxisCount: 4,
-              shrinkWrap: true,
-              physics: const NeverScrollableScrollPhysics(),
-              mainAxisSpacing: 12,
-              crossAxisSpacing: 10,
-              childAspectRatio: 0.72,
+            FlexGrid(
+              columns: 4,
+              spacing: 8,
+              runSpacing: 16,
               children: [for (final a in app.achievements) _Badge(a: a)],
             ),
             const SizedBox(height: 22),
@@ -239,8 +229,8 @@ class _SubjectSplitState extends State<_SubjectSplit> {
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         Text(app.t('Time by subject', 'විෂය අනුව කාලය'), style: ts(15, w: FontWeight.w800, c: p.text)),
         const SizedBox(height: 16),
-        Row(children: [
-          SizedBox(
+        LayoutBuilder(builder: (context, box) {
+          final chart = SizedBox(
             width: 130,
             height: 130,
             child: Stack(alignment: Alignment.center, children: [
@@ -268,23 +258,25 @@ class _SubjectSplitState extends State<_SubjectSplit> {
                 Text(app.t('total', 'මුළු'), style: ts(10, c: p.textMuted)),
               ]),
             ]),
-          ),
-          const SizedBox(width: 18),
-          Expanded(
-            child: Column(children: [
-              for (final e in data.take(5))
-                Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 5),
-                  child: Row(children: [
-                    Container(width: 10, height: 10, decoration: BoxDecoration(color: e.$1.color, borderRadius: BorderRadius.circular(3))),
-                    const SizedBox(width: 8),
-                    Expanded(child: Text(e.$1.name, maxLines: 1, overflow: TextOverflow.ellipsis, style: ts(12.5, w: FontWeight.w600, c: p.textSoft))),
-                    Text('${(e.$2 / total * 100).round()}%', style: ts(12.5, w: FontWeight.w800, c: p.text)),
-                  ]),
-                ),
-            ]),
-          ),
-        ]),
+          );
+          final legend = Column(children: [
+            for (final e in data.take(5))
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 5),
+                child: Row(children: [
+                  Container(width: 10, height: 10, decoration: BoxDecoration(color: e.$1.color, borderRadius: BorderRadius.circular(3))),
+                  const SizedBox(width: 8),
+                  Expanded(child: Text(e.$1.name, maxLines: 1, overflow: TextOverflow.ellipsis, style: ts(12.5, w: FontWeight.w600, c: p.textSoft))),
+                  Text('${(e.$2 / total * 100).round()}%', style: ts(12.5, w: FontWeight.w800, c: p.text)),
+                ]),
+              ),
+          ]);
+          // Narrow phones: legend under the chart so subject names aren't cut to "D…".
+          if (box.maxWidth < 300) {
+            return Column(children: [Center(child: chart), const SizedBox(height: 14), legend]);
+          }
+          return Row(children: [chart, const SizedBox(width: 18), Expanded(child: legend)]);
+        }),
         const SizedBox(height: 18),
         for (final s in app.subjects)
           Padding(
@@ -317,7 +309,8 @@ class _Badge extends StatelessWidget {
       message: app.t(a.descEn, a.descSi),
       triggerMode: TooltipTriggerMode.tap,
       child: Column(children: [
-        Stack(alignment: Alignment.center, children: [
+        // Scales down when a quarter of the screen is narrower than the ring.
+        FittedBox(fit: BoxFit.scaleDown, child: Stack(alignment: Alignment.center, children: [
           ProgressRing(
             value: a.progress,
             size: 62,
@@ -347,10 +340,16 @@ class _Badge extends StatelessWidget {
                 child: Icon(Icons.lock_rounded, size: 12, color: p.textMuted),
               ),
             ),
-        ]),
+        ])),
         const SizedBox(height: 6),
-        Text(app.t(a.en, a.si), textAlign: TextAlign.center, maxLines: 2, overflow: TextOverflow.ellipsis,
-            style: ts(10.5, w: FontWeight.w700, c: a.unlocked ? p.text : p.textMuted, h: 1.2)),
+        () {
+          final label = app.t(a.en, a.si);
+          final style = ts(10.5, w: FontWeight.w700, c: a.unlocked ? p.text : p.textMuted, h: 1.2);
+          // One long word ("Unstoppable") shrinks to fit instead of breaking mid-word.
+          return label.contains(' ')
+              ? Text(label, textAlign: TextAlign.center, maxLines: 2, overflow: TextOverflow.ellipsis, style: style)
+              : FittedBox(fit: BoxFit.scaleDown, child: Text(label, maxLines: 1, style: style));
+        }(),
       ]),
     );
   }

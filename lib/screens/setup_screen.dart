@@ -29,6 +29,7 @@ class _SetupScreenState extends State<SetupScreen> {
     }
     await app.savePrefs(_prefs);
     await app.completeSetup(consent: _consent);
+    if (mounted && Navigator.canPop(context)) Navigator.pop(context);
   }
 
   @override
@@ -54,8 +55,11 @@ class _SetupScreenState extends State<SetupScreen> {
             padding: const EdgeInsets.fromLTRB(12, 8, 20, 0),
             child: Row(children: [
               IconButton(
-                onPressed: _step == 0 ? null : () => setState(() => _step--),
-                icon: Icon(Icons.arrow_back_rounded, color: _step == 0 ? Colors.transparent : p.text),
+                onPressed: _step > 0
+                    ? () => setState(() => _step--)
+                    : (Navigator.canPop(context) ? () => Navigator.pop(context) : null),
+                icon: Icon(_step == 0 ? Icons.close_rounded : Icons.arrow_back_rounded,
+                    color: _step == 0 && !Navigator.canPop(context) ? Colors.transparent : p.text),
               ),
               Expanded(
                 child: Row(

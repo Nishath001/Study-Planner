@@ -4,11 +4,16 @@ import 'package:provider/provider.dart';
 import '../models/models.dart';
 import '../state/app_state.dart';
 import '../theme/app_theme.dart';
+import '../widgets/daily_task_ui.dart';
+import '../widgets/suggestion_card.dart';
 import '../widgets/task_sheets.dart';
 import '../widgets/ui.dart';
+import 'daily_tasks_screen.dart';
 import 'profile_screen.dart';
+import 'setup_screen.dart';
 import 'shell.dart';
 import 'subjects_screen.dart';
+import 'suggestions_screen.dart';
 
 class HomeScreen extends StatelessWidget {
   const HomeScreen({super.key});
@@ -60,8 +65,22 @@ class HomeScreen extends StatelessWidget {
             ]),
             const SizedBox(height: 22),
 
+            // ── Optional personalisation (setup is no longer forced) ─────
+            if (!app.setupDone) ...[
+              const FadeSlideIn(child: _SetupCard()),
+              const SizedBox(height: 16),
+            ],
+
             // ── Hero progress ────────────────────────────────────────────
             FadeSlideIn(child: _HeroCard(app: app, today: today)),
+            const SizedBox(height: 16),
+
+            // ── Quick actions ────────────────────────────────────────────
+            FadeSlideIn(delay: 40, child: _QuickActions(nav: nav)),
+            const SizedBox(height: 18),
+
+            // ── Daily tasks ──────────────────────────────────────────────
+            const FadeSlideIn(delay: 80, child: _TodayTasksCard()),
             const SizedBox(height: 16),
 
             // ── Missed → adaptive reschedule ─────────────────────────────
@@ -74,6 +93,20 @@ class HomeScreen extends StatelessWidget {
             if (next != null) ...[
               FadeSlideIn(delay: 100, child: _UpNext(task: next, onStart: () => nav.startFocus(next))),
               const SizedBox(height: 22),
+            ],
+
+            // ── Smart suggestions ────────────────────────────────────────
+            if (app.suggestions.isNotEmpty) ...[
+              SectionHeader(
+                app.t('Smart suggestions', 'බුද්ධිමත් යෝජනා'),
+                action: app.suggestions.length > 2
+                    ? app.t('See all (${app.suggestions.length})', 'සියල්ල (${app.suggestions.length})')
+                    : app.t('Why?', 'ඇයි?'),
+                onAction: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const SuggestionsScreen())),
+              ),
+              for (final s in app.suggestions.take(2))
+                FadeSlideIn(delay: 120, child: SuggestionCard(key: ValueKey(s.id), suggestion: s)),
+              const SizedBox(height: 10),
             ],
 
             // ── Exams ────────────────────────────────────────────────────
@@ -94,8 +127,8 @@ class HomeScreen extends StatelessWidget {
 
             // ── Today's plan ─────────────────────────────────────────────
             SectionHeader(
-              app.t("Today's plan", 'අද සැලැස්ම'),
-              action: app.t('Add task', 'එක් කරන්න'),
+              app.t("Today's study plan", 'අද අධ්‍යයන සැලැස්ම'),
+              action: app.t('Add session', 'සැසියක් එක් කරන්න'),
               onAction: () => showTaskEditor(context),
             ),
             if (app.subjects.isEmpty)
@@ -483,6 +516,172 @@ class _SubjectMini extends StatelessWidget {
               style: ts(11, w: FontWeight.w600, c: p.textMuted)),
         ]),
       ),
+    );
+  }
+}
+
+
+class _SetupCard extends StatelessWidget {
+  const _SetupCard();
+
+  @override
+  Widget build(BuildContext context) {
+    final app = context.watch<AppState>();
+    final p = context.pal;
+    return Container(
+      padding: const EdgeInsets.all(1.6),
+      decoration: BoxDecoration(gradient: AppColors.aiGradient, borderRadius: BorderRadius.circular(23)),
+      child: AppCard(
+        border: false,
+        radius: 21.5,
+        padding: const EdgeInsets.all(16),
+        onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const SetupScreen())),
+        child: Row(children: [
+          Container(
+            width: 46,
+            height: 46,
+            decoration: BoxDecoration(gradient: AppColors.aiGradient, borderRadius: BorderRadius.circular(15)),
+            child: const Icon(Icons.tune_rounded, color: Colors.white),
+          ),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text(app.t('Personalise your plan', 'ඔබේ සැලැස්ම පුද්ගලීකරණය කරන්න'), style: ts(14.5, w: FontWeight.w800, c: p.text)),
+              const SizedBox(height: 2),
+              Text(app.t("1 minute · tell us when you're free so the AI plans around your day",
+                      'මිනිත්තු 1 · AI ට ඔබේ දිනය වටා සැලසුම් කිරීමට ඔබ නිදහස් වේලාවන් කියන්න'),
+                  style: ts(12, c: p.textSoft, h: 1.4)),
+            ]),
+          ),
+          const SizedBox(width: 8),
+          Icon(Icons.arrow_forward_ios_rounded, size: 16, color: p.textMuted),
+        ]),
+      ),
+    );
+  }
+}
+
+class _QuickActions extends StatelessWidget {
+  final ShellNav nav;
+  const _QuickActions({required this.nav});
+
+  @override
+  Widget build(BuildContext context) {
+    final app = context.watch<AppState>();
+    final p = context.pal;
+    final items = [
+      (Icons.add_task_rounded, app.t('New task', 'නව කාර්යය'), const [Color(0xFF0D9488), Color(0xFF14B8A6)],
+          () => showDailyTaskEditor(context)),
+      (Icons.checklist_rounded, app.t('My tasks', 'කාර්යයන්'), const [Color(0xFF0284C7), Color(0xFF0EA5E9)],
+          () => Navigator.push(context, MaterialPageRoute(builder: (_) => const DailyTasksScreen()))),
+      (Icons.timer_rounded, app.t('Focus', 'අවධානය'), const [Color(0xFFE11D48), Color(0xFFF43F5E)], () => nav.go(3)),
+      (Icons.auto_awesome_rounded, app.t('AI plan', 'AI සැලැස්ම'), const [Color(0xFF6366F1), Color(0xFF8B5CF6)], () => nav.go(2)),
+    ];
+    return Row(children: [
+      for (final (i, x) in items.indexed) ...[
+        if (i > 0) const SizedBox(width: 10),
+        Expanded(
+          child: GestureDetector(
+            onTap: x.$4,
+            child: Column(children: [
+              Container(
+                height: 58,
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(colors: x.$3, begin: Alignment.topLeft, end: Alignment.bottomRight),
+                  borderRadius: BorderRadius.circular(18),
+                  boxShadow: [BoxShadow(color: x.$3.first.withOpacity(0.3), blurRadius: 12, offset: const Offset(0, 5))],
+                ),
+                child: Center(child: Icon(x.$1, color: Colors.white, size: 26)),
+              ),
+              const SizedBox(height: 7),
+              Text(x.$2, maxLines: 1, overflow: TextOverflow.ellipsis, style: ts(11.5, w: FontWeight.w700, c: p.textSoft)),
+            ]),
+          ),
+        ),
+      ],
+    ]);
+  }
+}
+
+class _TodayTasksCard extends StatelessWidget {
+  const _TodayTasksCard();
+
+  @override
+  Widget build(BuildContext context) {
+    final app = context.watch<AppState>();
+    final p = context.pal;
+    final today = dateOnly(DateTime.now());
+    final list = app.dailyFor(today);
+    final open = list.where((x) => !x.doneOn(today)).toList();
+    final (done, total) = app.dailyProgress(today);
+    final overdue = app.overdueDaily;
+    void openAll() => Navigator.push(context, MaterialPageRoute(builder: (_) => const DailyTasksScreen()));
+
+    return AppCard(
+      padding: const EdgeInsets.fromLTRB(16, 16, 16, 12),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          ProgressRing(
+            value: total == 0 ? 0 : done / total,
+            size: 44,
+            stroke: 5,
+            colors: const [AppColors.teal, AppColors.sky],
+            child: Text('$done', style: ts(14, w: FontWeight.w800, c: p.text)),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text(app.t("Today's tasks", 'අද කාර්යයන්'), style: ts(16, w: FontWeight.w800, c: p.text)),
+              Text(
+                total == 0
+                    ? app.t('Plan your day — add what you need to get done', 'ඔබේ දිනය සැලසුම් කරන්න')
+                    : done == total
+                        ? app.t('All $total done', 'සියල්ල $total අවසන්')
+                        : app.t('$done of $total done · ${open.length} left', '$total න් $done · ඉතිරි ${open.length}'),
+                style: ts(12, c: p.textMuted),
+              ),
+            ]),
+          ),
+          TextButton(onPressed: openAll, child: Text(app.t('Open', 'විවෘත'))),
+        ]),
+        const SizedBox(height: 12),
+        if (overdue.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 10),
+            child: Material(
+              color: AppColors.rose.withOpacity(p.isDark ? 0.16 : 0.08),
+              borderRadius: BorderRadius.circular(14),
+              child: InkWell(
+                borderRadius: BorderRadius.circular(14),
+                onTap: () => app.moveDailyToToday(overdue),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                  child: Row(children: [
+                    const Icon(Icons.history_rounded, size: 18, color: AppColors.rose),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(app.t('${overdue.length} overdue from earlier days', 'පෙර දිනවලින් ප්‍රමාද ${overdue.length}'),
+                          style: ts(12.5, w: FontWeight.w700, c: p.text)),
+                    ),
+                    Text(app.t('Move to today', 'අදට'), style: ts(12.5, w: FontWeight.w800, c: AppColors.rose)),
+                  ]),
+                ),
+              ),
+            ),
+          ),
+        for (final x in open.take(4)) DailyTaskTile(key: ValueKey(x.id), task: x, day: today, compact: true),
+        if (open.length > 4)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 10),
+            child: GestureDetector(
+              onTap: openAll,
+              child: Text(app.t('+ ${open.length - 4} more', '+ තවත් ${open.length - 4}'),
+                  style: ts(12.5, w: FontWeight.w800, c: AppColors.teal)),
+            ),
+          ),
+        QuickAddTask(day: today),
+        const SizedBox(height: 4),
+      ]),
     );
   }
 }
