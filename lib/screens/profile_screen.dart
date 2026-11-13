@@ -129,6 +129,19 @@ class ProfileScreen extends StatelessWidget {
               subtitle: app.t('Every morning at ${pr.dailyDigestHour}:00', 'සෑම උදෑසනකම ${pr.dailyDigestHour}:00 ට'),
               trailing: Switch(value: pr.dailyDigestOn, onChanged: (v) => app.savePrefs(pr..dailyDigestOn = v)),
             ),
+            if (!u.isGuest || app.cloudEnabled)
+              _Tile(
+                icon: Icons.mark_email_read_rounded,
+                color: AppColors.violet,
+                title: app.t('Email my study plans', 'මගේ සැලසුම් ඊමේල් කරන්න'),
+                subtitle: app.canEmailPlans
+                    ? app.t('Sent to ${u.email} when you apply a plan', 'සැලැස්මක් යොදන විට ${u.email} වෙත යවයි')
+                    : app.t('Sign in with an account to use this', 'මෙය භාවිතයට ගිණුමකින් පුරනය වන්න'),
+                trailing: Switch(
+                  value: app.emailPlans && app.canEmailPlans,
+                  onChanged: app.canEmailPlans ? app.setEmailPlans : null,
+                ),
+              ),
           ]),
 
           _Group(title: app.t('Research participation', 'පර්යේෂණ සහභාගීත්වය'), children: [

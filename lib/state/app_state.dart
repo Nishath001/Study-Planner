@@ -1,11 +1,15 @@
 import 'dart:convert';
 
+import 'package:cloud_functions/cloud_functions.dart';
 import 'package:flutter/material.dart';
 
 import '../models/models.dart';
 import '../services/auth_service.dart';
+import '../services/claude_service.dart';
 import '../services/cloud_service.dart';
+import '../services/email_config.dart';
 import '../services/notification_service.dart';
+import '../services/plan_email_service.dart';
 import '../services/scheduler_engine.dart';
 import '../services/storage_service.dart';
 import '../services/suggestion_engine.dart';
@@ -50,7 +54,11 @@ class AppState extends ChangeNotifier {
   StudyPreferences prefs = StudyPreferences();
   bool setupDone = false;
   bool researchConsent = false;
-  String claudeKey = '';
+  /// Plan with Claude AI through the Cloud Function (Firebase accounts only).
+  bool useClaude = false;
+
+  /// Email each applied plan to the registered address (Firebase accounts only).
+  bool emailPlans = true;
   Set<String> flags = {};
   Map<SuggestionType, FeedbackStat> suggestionFeedback = {};
   Map<String, DateTime> dismissedSuggestions = {};
@@ -93,7 +101,8 @@ class AppState extends ChangeNotifier {
     prefs = p == null ? StudyPreferences() : StudyPreferences.fromJson(p);
     setupDone = _store.read<bool>('setupDone') ?? false;
     researchConsent = _store.read<bool>('consent') ?? false;
-    claudeKey = _store.read<String>('claudeKey') ?? '';
+    useClaude = _store.read<bool>('useClaude') ?? false;
+    emailPlans = _store.read<bool>('emailPlans') ?? true;
     flags = (_store.read<String>('flags') ?? '').split(',').where((s) => s.isNotEmpty).toSet();
     final fb = _store.readMap('sugFeedback') ?? {};
     suggestionFeedback = {
@@ -352,9 +361,12 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> setClaudeKey(String k) async {
-    claudeKey = k.trim();
-    await _store.write('claudeKey', claudeKey);
+  /// Claude planning needs a signed-in Firebase account (the function checks it).
+  bool get claudeAvailable => isCloudUser;
+
+  Future<void> setUseClaude(bool v) async {
+    useClaude = v;
+    await _store.write('useClaude', v);
     notifyListeners();
   }
 
@@ -646,21 +658,99 @@ class AppState extends ChangeNotifier {
     notifyListeners();
     markMissed(save: false);
     try {
-      final result = _engine.generate(
+      var result = _engine.generate(
         subjects: subjects,
         existing: tasks,
         sessions: sessions,
         prefs: prefs,
         typeLabel: typeLabel,
       );
-      // Give the planner a beat so the UI can show its thinking state.
-      await Future.delayed(const Duration(milliseconds: 900));
+      if (useClaude && claudeAvailable && result.insights.isNotEmpty) {
+        // Claude plans from the same priorities; anything it can't do falls back to on-device.
+        final now = DateTime.now();
+        try {
+          result = await ClaudeService.instance.generate(
+            insights: result.insights,
+            keep: tasks
+                .where((x) => !(x.aiGenerated && x.status == TaskStatus.pending && x.start.isAfter(now)))
+                .toList(),
+            prefs: prefs,
+            adherence: result.adherence,
+            loadFactor: result.loadFactor,
+            language: language,
+            typeLabel: typeLabel,
+          );
+        } catch (e) {
+          debugPrint('Claude planning failed: $e');
+          planError = t('Claude AI unavailable (${_claudeError(e)}). Showing the on-device plan.',
+              'Claude AI ලබාගත නොහැක (${_claudeError(e)}). උපාංගයේ සැලැස්ම පෙන්වයි.');
+        }
+      } else {
+        // Give the planner a beat so the UI can show its thinking state.
+        await Future.delayed(const Duration(milliseconds: 900));
+      }
       lastPlan = result;
       return result;
     } finally {
       planning = false;
       notifyListeners();
     }
+  }
+
+  Future<void> setEmailPlans(bool v) async {
+    emailPlans = v;
+    await _store.write('emailPlans', v);
+    notifyListeners();
+  }
+
+  /// Plan emails work for registered accounts: via EmailJS from the app,
+  /// or the Cloud Function for Firebase accounts.
+  bool get canEmailPlans =>
+      user != null && !user!.isGuest && user!.email.isNotEmpty && (EmailConfig.useEmailJs || isCloudUser);
+
+  /// Emails [plan] to the student's registered address.
+  /// Returns (address, null) on success or (null, message) on failure.
+  Future<(String?, String?)> emailPlan(PlanResult plan) async {
+    if (!canEmailPlans) {
+      return (null, t('Sign in with an account to get plans by email.', 'ඊමේල් ලබා ගැනීමට ගිණුමකින් පුරනය වන්න.'));
+    }
+    final today = DateTime.now().toIso8601String().substring(0, 10);
+    final parts = (_store.read<String>('emailCount') ?? '').split('|');
+    final sentToday = parts.length == 2 && parts[0] == today ? int.tryParse(parts[1]) ?? 0 : 0;
+    if (sentToday >= EmailConfig.dailyLimit) {
+      return (null, t('daily limit of ${EmailConfig.dailyLimit} emails reached', 'දිනකට ඊමේල් ${EmailConfig.dailyLimit} සීමාව ඉක්මවා ඇත'));
+    }
+    try {
+      final to = await PlanEmailService.instance.send(
+        PlanEmailService.buildRequest(
+          plan: plan,
+          subjects: subjects,
+          name: user!.name,
+          language: language,
+          typeLabel: typeLabel,
+        ),
+        to: user!.email,
+        name: user!.name,
+      );
+      await _store.write('emailCount', '$today|${sentToday + 1}');
+      return (to, null);
+    } catch (e) {
+      debugPrint('Plan email failed: $e');
+      return (null, e is PlanEmailException ? e.message : _claudeError(e));
+    }
+  }
+
+  String _claudeError(Object e) {
+    if (e is FirebaseFunctionsException) {
+      return switch (e.code) {
+        'not-found' => t('function not deployed', 'function එක deploy කර නැත'),
+        'unauthenticated' => t('sign in again', 'නැවත පුරනය වන්න'),
+        'deadline-exceeded' => t('took too long', 'වැඩි කාලයක් ගත විය'),
+        'unavailable' || 'internal' when (e.message ?? '').isEmpty => t('no connection', 'සම්බන්ධතාවය නැත'),
+        _ => e.message ?? e.code,
+      };
+    }
+    return t('no connection', 'සම්බන්ධතාවය නැත');
   }
 
   /// Replaces future, still-pending AI tasks with the new plan.

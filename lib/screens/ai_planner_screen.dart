@@ -31,14 +31,25 @@ class _AIPlannerScreenState extends State<AIPlannerScreen> {
   }
 
   Future<void> _apply(AppState app) async {
-    await app.applyPlan(_preview!);
+    final plan = _preview!;
+    await app.applyPlan(plan);
     if (!mounted) return;
-    final n = _preview!.tasks.length;
+    final n = plan.tasks.length;
+    final messenger = ScaffoldMessenger.of(context);
     setState(() => _preview = null);
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+    messenger.showSnackBar(SnackBar(
       content: Text(app.t('$n sessions added to your plan', 'සැසි $n ක් ඔබේ සැලැස්මට එක් කළා')),
     ));
     context.read<ShellNav>().go(1);
+    // Email a copy to the registered address in the background.
+    if (app.emailPlans && app.canEmailPlans && n > 0) {
+      final (to, err) = await app.emailPlan(plan);
+      messenger.showSnackBar(SnackBar(
+        content: Text(to != null
+            ? app.t('Plan emailed to $to', 'සැලැස්ම $to වෙත ඊමේල් කළා')
+            : app.t('Could not email the plan ($err)', 'සැලැස්ම ඊමේල් කළ නොහැක ($err)')),
+      ));
+    }
   }
 
   @override
@@ -55,7 +66,10 @@ class _AIPlannerScreenState extends State<AIPlannerScreen> {
           children: [
             Row(children: [
               Expanded(child: Text(app.t('AI Planner', 'AI සැලසුම්කරු'), style: ts(26, w: FontWeight.w800, c: p.text))),
-              Pill(app.t('On-device', 'උපාංගය තුළ'), AppColors.teal, icon: Icons.memory_rounded),
+              if (app.useClaude && app.claudeAvailable)
+                const Pill('Claude AI', AppColors.violet, icon: Icons.cloud_rounded)
+              else
+                Pill(app.t('On-device', 'උපාංගය තුළ'), AppColors.teal, icon: Icons.memory_rounded),
             ]),
             const SizedBox(height: 16),
             _hero(app),
@@ -78,6 +92,10 @@ class _AIPlannerScreenState extends State<AIPlannerScreen> {
               _inputs(app),
               const SizedBox(height: 20),
               _styleChooser(app),
+              if (app.cloudEnabled) ...[
+                const SizedBox(height: 12),
+                _claudeCard(app),
+              ],
               const SizedBox(height: 20),
               GradientButton(
                 label: app.t('Generate my ${app.prefs.planHorizonDays}-day plan', 'දින ${app.prefs.planHorizonDays} සැලැස්ම සාදන්න'),
@@ -326,6 +344,46 @@ class _AIPlannerScreenState extends State<AIPlannerScreen> {
     ]);
   }
 
+  /// Optional cloud planning: Claude AI through the Firebase Cloud Function.
+  Widget _claudeCard(AppState app) {
+    final p = context.pal;
+    final available = app.claudeAvailable;
+    final on = app.useClaude && available;
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 200),
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: on ? AppColors.violet.withOpacity(p.isDark ? 0.14 : 0.08) : p.surface,
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: on ? AppColors.violet : p.border, width: on ? 1.8 : 1),
+      ),
+      child: Row(children: [
+        const IconBadge(Icons.cloud_rounded, AppColors.violet, size: 40, radius: 12),
+        const SizedBox(width: 12),
+        Expanded(
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text(app.t('Plan with Claude AI', 'Claude AI සමඟ සැලසුම් කරන්න'), style: ts(14, w: FontWeight.w800, c: p.text)),
+            const SizedBox(height: 2),
+            Text(
+              available
+                  ? app.t('Runs securely in Firebase Cloud Functions using your chosen style. Needs internet; falls back to on-device AI.',
+                      'ඔබ තෝරාගත් රටාවෙන් Firebase Cloud Functions හරහා ආරක්ෂිතව ක්‍රියා කරයි. අන්තර්ජාලය අවශ්‍යයි; නැතහොත් උපාංගයේ AI භාවිතා වේ.')
+                  : app.t('Sign in with your StudySync account (not guest) to use Claude AI.',
+                      'Claude AI භාවිතයට StudySync ගිණුමෙන් පුරනය වන්න (අමුත්තා ලෙස නොව).'),
+              style: ts(12, c: p.textMuted, h: 1.35),
+            ),
+          ]),
+        ),
+        const SizedBox(width: 8),
+        Switch(
+          value: on,
+          activeColor: AppColors.violet,
+          onChanged: available ? app.setUseClaude : null,
+        ),
+      ]),
+    );
+  }
+
   String? _styleEffect(AppState app, PlanMode m, Map<PlanMode, PlanResult> previews) {
     final bal = previews[PlanMode.balanced]!, r = previews[m]!;
     switch (m) {
@@ -365,6 +423,10 @@ class _AIPlannerScreenState extends State<AIPlannerScreen> {
             const Icon(Icons.auto_awesome_rounded, color: AppColors.violet),
             const SizedBox(width: 8),
             Expanded(child: Text(app.t('Your plan is ready', 'ඔබේ සැලැස්ම සූදානම්'), style: ts(17, w: FontWeight.w800, c: p.text))),
+            if (plan.engine == 'claude')
+              const Pill('Claude AI', AppColors.violet, icon: Icons.cloud_rounded)
+            else
+              Pill(app.t('On-device', 'උපාංගය තුළ'), AppColors.teal, icon: Icons.memory_rounded),
           ]),
           const SizedBox(height: 12),
           // Switch style here to see the plan change straight away.
@@ -780,7 +842,16 @@ class _ThinkingState extends State<_Thinking> with SingleTickerProviderStateMixi
           ),
         ),
         const SizedBox(height: 18),
-        Text(app.t('Building your plan…', 'ඔබේ සැලැස්ම සාදමින්…'), style: ts(16, w: FontWeight.w800, c: p.text)),
+        Text(
+          app.useClaude && app.claudeAvailable
+              ? app.t('Claude is building your plan…', 'Claude ඔබේ සැලැස්ම සාදමින්…')
+              : app.t('Building your plan…', 'ඔබේ සැලැස්ම සාදමින්…'),
+          style: ts(16, w: FontWeight.w800, c: p.text),
+        ),
+        if (app.useClaude && app.claudeAvailable) ...[
+          const SizedBox(height: 4),
+          Text(app.t('This can take up to a minute', 'මෙයට මිනිත්තුවක් පමණ ගත විය හැක'), style: ts(12, c: p.textMuted)),
+        ],
         const SizedBox(height: 14),
         for (final (i, s) in steps.indexed)
           FadeSlideIn(

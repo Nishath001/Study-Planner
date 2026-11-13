@@ -1,98 +1,99 @@
-import 'dart:convert';
-
-import 'package:http/http.dart' as http;
+import 'package:cloud_functions/cloud_functions.dart';
 
 import '../models/models.dart';
 import 'scheduler_engine.dart';
 
-/// Optional cloud planner. When the student adds an Anthropic API key in
-/// Settings, Claude builds the timetable from the same inputs the on-device
-/// engine uses; otherwise the on-device engine is used.
+/// Claude AI planning through the Firebase Cloud Function `generateStudyPlan`.
+///
+/// The app never holds an Anthropic API key: it sends the plan inputs to the
+/// function (signed-in Firebase users only), the function asks Claude and
+/// returns a checked timetable. See functions/index.js.
 class ClaudeService {
   ClaudeService._();
   static final instance = ClaudeService._();
 
-  static const _endpoint = 'https://api.anthropic.com/v1/messages';
-  static const _model = 'claude-sonnet-5-5';
+  /// Same region as the Firestore database and the deployed function.
+  static const region = 'asia-south1';
 
-  Future<PlanResult> generate({
-    required String apiKey,
+  HttpsCallable get _call => FirebaseFunctions.instanceFor(region: region).httpsCallable(
+        'generateStudyPlan',
+        options: HttpsCallableOptions(timeout: const Duration(minutes: 3)),
+      );
+
+  /// Builds the request sent to the function. Public so it can be tested.
+  static Map<String, dynamic> buildRequest({
+    required DateTime now,
     required List<SubjectInsight> insights,
+    required List<StudyTask> keep,
     required StudyPreferences prefs,
     required double adherence,
     required double loadFactor,
     required String language,
-    required String Function(SessionType) typeLabel,
-  }) async {
-    final now = DateTime.now();
+  }) {
+    final today = dateOnly(now);
     final days = List.generate(prefs.planHorizonDays, (d) {
-      final day = dateOnly(now).add(Duration(days: d));
-      return '{"day":$d,"weekday":"${_weekday(day)}","minutes":${(prefs.minutesFor(day) * loadFactor).round()}}';
-    }).join(',');
-    final subjects = insights
-        .map((i) => '{"id":"${i.subject.id}","name":${jsonEncode(i.subject.name)},'
-            '"difficulty":"${i.subject.difficulty.name}",'
-            '"daysToExam":${i.subject.daysToExam},'
-            '"remainingMinutes":${i.remainingMinutes},'
-            '"priority":${i.score.toStringAsFixed(2)}}')
-        .join(',');
+      final day = today.add(Duration(days: d));
+      var startMinute = prefs.window.startHour * 60;
+      if (d == 0) {
+        // Not earlier than 15 minutes from now, rounded up to 5 minutes.
+        final soon = now.hour * 60 + now.minute + 15;
+        startMinute = startMinute > soon ? startMinute : ((soon + 4) ~/ 5) * 5;
+      }
+      final busy = [
+        for (final t in keep.where((t) => sameDay(t.start, day) && t.status != TaskStatus.skipped))
+          [t.start.hour * 60 + t.start.minute, (t.start.hour * 60 + t.start.minute + t.durationMinutes).clamp(0, 1440)],
+      ];
+      return {
+        'weekday': const ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'][day.weekday - 1],
+        'startMinute': startMinute.clamp(0, 1440),
+        'minutes': (prefs.minutesFor(day) * loadFactor).round().clamp(0, 960),
+        'busy': busy,
+      };
+    });
+    return {
+      'language': language,
+      'mode': prefs.planMode.name,
+      'sessionMinutes': prefs.sessionMinutes.clamp(15, 180),
+      'breakMinutes': prefs.breakMinutes.clamp(0, 60),
+      'adherence': adherence,
+      'days': days,
+      'subjects': [
+        for (final i in insights.take(30))
+          {
+            'id': i.subject.id,
+            'name': i.subject.name,
+            'difficulty': i.subject.difficulty.name,
+            'daysToExam': i.subject.daysToExam,
+            'remainingMinutes': i.remainingMinutes,
+            'priority': i.score,
+          }
+      ],
+    };
+  }
 
-    final prompt = '''
-Build a ${prefs.planHorizonDays}-day study timetable for a Sri Lankan university student.
-Current time: ${now.toIso8601String()}. Do not schedule anything earlier than now.
-Preferred start hour: ${prefs.window.startHour}:00. Session length: ${prefs.sessionMinutes} min, break: ${prefs.breakMinutes} min. Nothing after 23:00.
-Available minutes per day (never exceed): [$days]
-Subjects (with pre-computed priority): [$subjects]
-Rules: never schedule a subject on or after its exam day; the day before an exam is final revision for that subject; interleave subjects; hard subjects early in the day; follow spaced repetition (learn → practice → review, past papers close to exams).
-Reply with JSON only, no prose:
-{"advice":"one encouraging sentence in ${language == 'SI' ? 'Sinhala' : 'English'}","sessions":[{"day":0,"subjectId":"id","startHour":8,"startMinute":0,"minutes":50,"type":"learn|practice|review|pastPaper|finalRevision"}]}''';
-
-    final res = await http
-        .post(
-          Uri.parse(_endpoint),
-          headers: {
-            'content-type': 'application/json',
-            'x-api-key': apiKey,
-            'anthropic-version': '2023-06-01',
-            'anthropic-dangerous-direct-browser-access': 'true',
-          },
-          body: jsonEncode({
-            'model': _model,
-            'max_tokens': 8000,
-            'messages': [
-              {'role': 'user', 'content': prompt}
-            ],
-          }),
-        )
-        .timeout(const Duration(seconds: 90));
-
-    if (res.statusCode != 200) {
-      throw Exception('Claude API ${res.statusCode}');
-    }
-    final body = jsonDecode(utf8.decode(res.bodyBytes)) as Map<String, dynamic>;
-    final text = (body['content'] as List)
-        .where((c) => c['type'] == 'text')
-        .map((c) => c['text'] as String)
-        .join();
-    final start = text.indexOf('{');
-    final end = text.lastIndexOf('}');
-    if (start < 0 || end <= start) throw Exception('Unexpected response');
-    final data = jsonDecode(text.substring(start, end + 1)) as Map<String, dynamic>;
-
-    final byId = {for (final i in insights) i.subject.id: i};
+  /// Turns the function's reply into study tasks. Public so it can be tested.
+  static PlanResult parseReply({
+    required Map<String, dynamic> data,
+    required DateTime now,
+    required List<SubjectInsight> insights,
+    required double adherence,
+    required double loadFactor,
+    required String Function(SessionType) typeLabel,
+  }) {
+    final byId = {for (final i in insights) i.subject.id: i..allocatedMinutes = 0..sessions = 0};
     final tasks = <StudyTask>[];
     var n = 0;
-    for (final raw in (data['sessions'] as List? ?? [])) {
-      final s = Map<String, dynamic>.from(raw);
+    for (final raw in (data['sessions'] as List? ?? const [])) {
+      final s = Map<String, dynamic>.from(raw as Map);
       final insight = byId[s['subjectId']];
       if (insight == null) continue;
-      final day = dateOnly(now).add(Duration(days: (s['day'] as num).toInt()));
-      final start = day.add(Duration(
-          hours: (s['startHour'] as num).toInt(),
-          minutes: (s['startMinute'] as num? ?? 0).toInt()));
+      final start = dateOnly(now).add(Duration(
+        days: (s['day'] as num).toInt(),
+        hours: (s['startHour'] as num).toInt(),
+        minutes: (s['startMinute'] as num? ?? 0).toInt(),
+      ));
       if (start.isBefore(now)) continue;
-      final type = SessionType.values.firstWhere((t) => t.name == s['type'],
-          orElse: () => SessionType.learn);
+      final type = SessionType.values.firstWhere((t) => t.name == s['type'], orElse: () => SessionType.learn);
       final minutes = (s['minutes'] as num).toInt().clamp(15, 180);
       tasks.add(StudyTask(
         id: 'claude_${now.millisecondsSinceEpoch}_${n++}',
@@ -107,18 +108,46 @@ Reply with JSON only, no prose:
         ..allocatedMinutes += minutes
         ..sessions += 1;
     }
-    if (tasks.isEmpty) throw Exception('Empty plan');
     tasks.sort((a, b) => a.start.compareTo(b.start));
+    final advice = (data['advice'] as String?)?.trim();
     return PlanResult(
       tasks: tasks,
       insights: insights,
       adherence: adherence,
       loadFactor: loadFactor,
       engine: 'claude',
-      advice: data['advice'] as String?,
+      advice: advice == null || advice.isEmpty ? null : advice,
     );
   }
 
-  String _weekday(DateTime d) =>
-      const ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'][d.weekday - 1];
+  Future<PlanResult> generate({
+    required List<SubjectInsight> insights,
+    required List<StudyTask> keep,
+    required StudyPreferences prefs,
+    required double adherence,
+    required double loadFactor,
+    required String language,
+    required String Function(SessionType) typeLabel,
+  }) async {
+    final now = DateTime.now();
+    final res = await _call.call<dynamic>(buildRequest(
+      now: now,
+      insights: insights,
+      keep: keep,
+      prefs: prefs,
+      adherence: adherence,
+      loadFactor: loadFactor,
+      language: language,
+    ));
+    final plan = parseReply(
+      data: Map<String, dynamic>.from(res.data as Map),
+      now: now,
+      insights: insights,
+      adherence: adherence,
+      loadFactor: loadFactor,
+      typeLabel: typeLabel,
+    );
+    if (plan.tasks.isEmpty) throw Exception('Claude returned an empty plan');
+    return plan;
+  }
 }
